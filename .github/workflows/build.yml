@@ -1,0 +1,120 @@
+name: Mozai build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: mozai-build-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web — typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Run the play-area-sizing gate BEFORE the build so a regression
+      # fails fast. The grep MUST return zero matches; any literal use
+      # of `innerHeight` in src/ is a sign that a resize regression has
+      # crept in. Resize sizing always goes through ResizeObserver(#game).
+      - name: Play-area sizing gate
+        run: |
+          set -e
+          if grep -rn 'innerHeight' src; then
+            echo "FAIL: 'innerHeight' found in src/ — play-area sizing must use ResizeObserver(#game)."
+            exit 1
+          fi
+          echo "PASS: no innerHeight in src/."
+
+      - name: Build (typecheck + vite)
+        env:
+          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
+          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mozai-web-dist
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  android:
+    name: Android — debug APK
+    runs-on: ubuntu-latest
+    needs: web
+    # The Android job runs after the web build so a typecheck failure
+    # short-circuits before we spin up the (slower) Android toolchain.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
+      - run: npm ci
+
+      - name: Web build (for cap sync)
+        env:
+          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
+          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+        run: npm run build
+
+      - name: cap sync android
+        run: npx cap sync android
+
+      - name: Gradle assembleDebug
+        working-directory: android
+        env:
+          # Substituted into AndroidManifest.xml via the
+          # `${admobAppId}` placeholder set in app/build.gradle.
+          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mozai-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      # Mirrors Last Tile's Layer 4 post-build content scan: when real
+      # secrets ARE set (i.e. this is a production build candidate),
+      # ensure the APK never contains the Google test publisher prefix.
+      # Skipped when no real secret is present — the build is then
+      # legitimately using test ids.
+      - name: Post-build test-id scan
+        if: ${{ env.HAS_REAL_SECRET == '1' }}
+        env:
+          HAS_REAL_SECRET: ${{ secrets.MOZAI_ADMOB_APP_ID != '' && '1' || '0' }}
+        run: |
+          set -e
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          if unzip -p "$APK" '*' | grep -q "3940256099942544"; then
+            echo "FATAL: APK contains the AdMob test publisher prefix."
+            echo "Real ad ids are configured for this build, so test ids must not appear."
+            exit 1
+          fi
+          echo "APK ad-id scan: clean (no test publisher prefix)."

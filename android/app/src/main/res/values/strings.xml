@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Mozai</string>
+    <string name="title_activity_main">Mozai</string>
+    <string name="package_name">com.moonstreamtech.mozai</string>
+    <string name="custom_url_scheme">com.moonstreamtech.mozai</string>
+</resources>

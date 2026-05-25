@@ -1,0 +1,76 @@
+apply plugin: 'com.android.application'
+
+// AdMob ids — mirror of src/env.ts but read at native build time so the
+// AndroidManifest `com.google.android.gms.ads.APPLICATION_ID` meta-data
+// can be substituted via a manifest placeholder. Real ids come from
+// GitHub Secrets (MOZAI_ADMOB_APP_ID); missing values fall back to
+// Google's official AdMob test ids so dev builds always have a working
+// banner placeholder.
+//
+// The test publisher prefix `ca-app-pub-3940256099942544` is documented
+// at https://developers.google.com/admob/android/test-ads. CI greps the
+// release APK for this prefix and fails the build if found, mirroring
+// Last Tile's Layer 4 post-build content scan.
+def ADMOB_TEST_APP_ID = "ca-app-pub-3940256099942544~3347511713"
+def envAdmobAppId = (System.getenv("MOZAI_ADMOB_APP_ID") ?: "").trim()
+def resolvedAdmobAppId = envAdmobAppId ?: ADMOB_TEST_APP_ID
+def admobMode = envAdmobAppId ? "PRODUCTION" : "TEST"
+println("[Mozai] AdMob mode: ${admobMode} (real ids never logged)")
+
+android {
+    namespace "com.moonstreamtech.mozai"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.moonstreamtech.mozai"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "0.1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        // The AndroidManifest's `${admobAppId}` placeholder reads this
+        // value. Substituting at the Gradle level (not in the manifest
+        // directly) keeps the test/real switch in one place and lets CI
+        // override per-variant without editing the manifest.
+        manifestPlaceholders = [ admobAppId: resolvedAdmobAppId ]
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

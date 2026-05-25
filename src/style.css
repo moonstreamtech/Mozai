@@ -1,0 +1,159 @@
+/*
+ * Mozai foundation layout.
+ *
+ * Three rules carry the whole resize contract:
+ *
+ *  1. `html, body` fill the visual viewport WITHOUT scrolling. We use
+ *     100dvh (dynamic viewport) so the address bar / keyboard expanding
+ *     and collapsing reshapes the layout instead of leaving a gap at
+ *     the bottom. `overflow: hidden` keeps the WebView from ever
+ *     becoming scrollable — a one-pixel overflow on a colour-by-number
+ *     canvas reads as a layout bug to the player.
+ *
+ *  2. `--banner-h` lives on :root and is updated from banner.ts every
+ *     time the AdMob banner reports a new height (or the web
+ *     placeholder strip is shown). `#game` reserves space for it via
+ *     `height: calc(100% - var(--banner-h))`. The banner itself uses
+ *     `height: var(--banner-h)` — that way the two boxes always sum to
+ *     the viewport height regardless of what the banner SDK decides
+ *     the adaptive size should be on this device.
+ *
+ *  3. `env(safe-area-inset-*)` is rolled into `--banner-h` so the
+ *     banner sits ABOVE the gesture-nav handle, not under it, and the
+ *     play area is correspondingly smaller. Top inset is consumed by
+ *     `#game` padding directly so the play canvas never paints under a
+ *     notch / status bar.
+ *
+ * The canvas inside `#game` is sized by resize.ts based on the
+ * ResizeObserver-reported box of `#game` — NEVER from a raw
+ * layout-viewport read. Anything that reads the window height for
+ * sizing decisions will trip the grep gate in CI.
+ */
+
+:root {
+  /*
+   * --banner-h defaults to env(safe-area-inset-bottom) alone so the
+   * play area never overlaps the gesture nav even in the half-second
+   * before banner.ts reports a height. banner.ts overwrites this with
+   *   measuredBannerPx + env(safe-area-inset-bottom)
+   * once the AdMob SDK (or the placeholder strip) settles.
+   */
+  --banner-h: env(safe-area-inset-bottom, 0px);
+
+  /*
+   * Brand palette — placeholder values. Will be replaced when the
+   * colour-by-number renderer lands; kept neutral here so the
+   * placeholder grid reads on every background.
+   */
+  --bg-top: #0f1722;
+  --bg-bottom: #05080d;
+  --grid-cell: #1f2a3a;
+  --grid-line: #324259;
+  --grid-accent: #f4c062;
+  --text-dim: #8fa0b6;
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+  background: linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
+  color: var(--text-dim);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  /* Block iOS rubber-band / pull-to-refresh. */
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/*
+ * Play area. height is the viewport minus the reserved banner band;
+ * width is full viewport minus the horizontal safe-area insets (e.g.
+ * landscape notches). The padding-top consumes the status bar / top
+ * inset directly so the canvas never paints into it.
+ */
+#game {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  width: 100%;
+  height: calc(100dvh - var(--banner-h));
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* The canvas fills #game's content box; resize.ts handles dpr scaling. */
+}
+
+#play-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /*
+   * Crisp pixel rendering for the colour-by-number art. Has no effect
+   * on the placeholder grid (which is drawn at integer coords already)
+   * but keeps the WebView from interpolating once real pixel art
+   * lands.
+   */
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/*
+ * Reserved bottom band. On native (AdMob banner present) this stays
+ * transparent — the native banner view is drawn ON TOP. On web /
+ * preview (no native plugin) banner.ts paints a placeholder strip in
+ * here so the layout is identical to the device.
+ */
+#banner {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100%;
+  height: var(--banner-h);
+  background: transparent;
+  /* Above the play canvas, below the debug readout. */
+  z-index: 10;
+  pointer-events: none;
+}
+
+#banner.web-placeholder {
+  background: linear-gradient(180deg, #1a232e, #0c1118);
+  border-top: 1px solid #2a3848;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7a90;
+  font-size: 11px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+#debug {
+  position: absolute;
+  top: env(safe-area-inset-top, 8px);
+  right: 8px;
+  z-index: 100;
+  background: rgba(0, 0, 0, 0.65);
+  color: #c5d2e6;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid #324259;
+  pointer-events: none;
+  white-space: pre;
+}

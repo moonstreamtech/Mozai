@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      viewport-fit=cover so safe-area-inset-* env() values resolve to the
+      real device insets (notches, gesture nav). user-scalable=no +
+      maximum-scale=1.0 prevent the WebView from intercepting pinch as a
+      zoom — colour-by-number panning will own those gestures later.
+      Width + initial-scale guarantee a 1.0 logical:CSS-pixel mapping so
+      devicePixelRatio is the only multiplier the renderer has to think
+      about.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <!--
+      Match the gradient background colour so the system status-bar
+      letterbox (when present) doesn't strobe white on launch.
+    -->
+    <meta name="theme-color" content="#0b1018" />
+    <title>Mozai</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!--
+      Three top-level slots, in source order:
+        #game   — playable area. ResizeObserver(#game) is the single
+                  source of truth for the canvas fit. NEVER read
+                  window.innerHeight for play-area sizing.
+        #banner — reserved bottom strip whose height is mirrored on
+                  :root via --banner-h. On native the AdMob banner is a
+                  NATIVE view rendered on top of this strip; on web the
+                  strip itself is drawn (see banner.ts placeholder mode)
+                  so the web layout matches the device layout exactly.
+        #debug  — env-toggleable diagnostic overlay (MOZAI_DEBUG=1).
+    -->
+    <div id="game" aria-label="Play area">
+      <canvas id="play-canvas"></canvas>
+    </div>
+    <div id="banner" aria-hidden="true"></div>
+    <div id="debug" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
