@@ -818,6 +818,21 @@ body {
   z-index: 20;
 }
 
+/*
+ * Honour the HTML `hidden` attribute. The UA-stylesheet rule
+ * `[hidden] { display: none }` loses to the author rule above
+ * (.paint-completion has equal specificity but is later in source,
+ * and `display: flex` wins over UA's display: none for `hidden`).
+ * Without this rule the completion modal was painting from the
+ * moment the scene mounted, REGARDLESS of state.isComplete() —
+ * which is the actual bug behind the "Complete! at 0%" reports.
+ * `[hidden]` selector adds one attribute to the specificity so it
+ * beats the plain class rule above.
+ */
+.paint-completion[hidden] {
+  display: none;
+}
+
 .paint-completion-card {
   background: var(--scene-bg);
   padding: 24px 28px;

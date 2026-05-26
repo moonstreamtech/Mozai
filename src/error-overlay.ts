@@ -238,6 +238,12 @@ function openDebugPopup(): void {
   if (debugPopupEl) return;
   const overlay = document.createElement('div');
   overlay.id = 'mozai-debug-popup';
+  // padding-bottom = 10px + --banner-h so the Copy/Close action bar
+  // sits ABOVE the AdMob banner. The popup is position:fixed on the
+  // WebView (which extends under the native banner overlay), so
+  // env(safe-area-inset-bottom) alone is NOT enough — the banner is
+  // above the safe area. --banner-h already includes the safe-area
+  // inset (banner.ts adds it), so we don't double-count.
   overlay.style.cssText = [
     'position:fixed',
     'inset:0',
@@ -247,7 +253,7 @@ function openDebugPopup(): void {
     'font:12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
     'display:flex',
     'flex-direction:column',
-    'padding:calc(10px + env(safe-area-inset-top,0px)) 10px calc(10px + env(safe-area-inset-bottom,0px))',
+    'padding:calc(10px + env(safe-area-inset-top,0px)) 10px calc(10px + var(--banner-h, 60px))',
   ].join(';');
 
   const header = document.createElement('div');

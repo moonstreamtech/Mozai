@@ -217,7 +217,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
             // is only constructed AFTER load so this can only fire
             // post-load, but a future refactor that pre-wires the
             // input would be silently caught here.
-            if (completed && loadFinished) onPuzzleCompleted();
+            if (completed && loadFinished) onPuzzleCompleted('cell-filled');
           },
         });
 
@@ -252,7 +252,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         const finalSnap = state.snapshot();
         if (finalSnap.complete) {
           // Resume of an already-completed picture — show the modal.
-          onPuzzleCompleted();
+          onPuzzleCompleted('resume-already-complete');
         } else {
           const first = firstAvailableColor();
           if (first >= 0) selectColor(first);
@@ -374,8 +374,28 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       }, 600);
     }
 
-    function onPuzzleCompleted(): void {
+    /**
+     * Single chokepoint for showing the completion modal. Every
+     * caller passes a `source` tag so any future spurious trigger is
+     * visible in the debug popup. We RE-CHECK state.isComplete()
+     * inside (not just at the call site) so the modal can never
+     * render in the not-actually-complete state even if a caller
+     * forgets the gate. The previous failure was a CSS one (the
+     * `hidden` attribute being overridden by `display: flex`); this
+     * guard is the JS-layer belt-and-braces.
+     */
+    function onPuzzleCompleted(source: string): void {
       if (!state) return;
+      const snap = state.snapshot();
+      const complete = state.isComplete();
+      diagLog(
+        `COMPLETE modal trigger: source=${source} isComplete=${complete} ` +
+          `filled=${snap.filledCount}/${snap.paintableCount} loadFinished=${loadFinished}`,
+      );
+      if (!complete || !loadFinished) {
+        diagLog('COMPLETE suppressed (state not complete or load unfinished)');
+        return;
+      }
       completionEl.hidden = false;
       // Persist progress (best-effort) before notifying the global
       // progress store. markCompleted writes to a different key so
