@@ -1,0 +1,15 @@
+{
+  "id": "r2-002",
+  "room": 2,
+  "difficulty": 2,
+  "w": 5,
+  "h": 3,
+  "palette": ["#1f2a3a", "#4dd0e1", "#ffd54f"],
+  "cells": [
+    0, 0, 1, 0, 0,
+    0, 1, 2, 1, 0,
+    0, 0, 1, 0, 0
+  ],
+  "colorCounts": { "0": 10, "1": 4, "2": 1 },
+  "paintableCells": 15
+}

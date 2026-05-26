@@ -5,7 +5,10 @@
   "type": "module",
   "description": "Mozai — pixel color-by-number mobile game (Moonstream Tech).",
   "scripts": {
+    "build-content-index": "node scripts/build-content-index.mjs",
+    "predev": "npm run build-content-index",
     "dev": "vite",
+    "prebuild": "npm run build-content-index",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host",
     "typecheck": "tsc --noEmit",
@@ -19,6 +22,7 @@
     "@capacitor/android": "^6.1.2",
     "@capacitor/app": "^6.0.1",
     "@capacitor/core": "^6.1.2",
+    "@capacitor/preferences": "^6.0.4",
     "@capacitor/status-bar": "^6.0.1"
   },
   "devDependencies": {
