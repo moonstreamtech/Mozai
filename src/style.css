@@ -378,7 +378,7 @@ body {
   line-height: 1.5;
 }
 
-/* --- Room interior: picture list --- */
+/* --- Room interior: picture list (legacy stub — kept for paint-stub markup compatibility) --- */
 
 .picture-list {
   display: flex;
@@ -432,6 +432,100 @@ body {
   font-size: 18px;
   color: var(--scene-fill);
   font-weight: 800;
+}
+
+/* --- Room interior: real silhouette grid --- */
+
+.room-body {
+  width: 100%;
+}
+
+.picture-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.picture-tile {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  padding: 6px;
+  background: var(--scene-bg);
+  border: 1px solid var(--scene-border);
+  border-radius: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  font: inherit;
+  color: var(--scene-ink);
+  /* IntersectionObserver uses the closest scrollable ancestor as
+     the root by default. We don't want browser-default focus rings
+     flashing on tap; an explicit ring lands on keyboard focus only. */
+  outline: none;
+  transition: transform 80ms ease-out;
+}
+
+.picture-tile:not(:disabled):active {
+  transform: scale(0.97);
+}
+
+.picture-tile:focus-visible {
+  box-shadow: 0 0 0 3px var(--scene-fill);
+}
+
+.picture-tile.is-completed {
+  border-color: var(--scene-fill);
+  background: #fffaf0;
+}
+
+.picture-tile.is-error {
+  cursor: default;
+  background: #fff5f5;
+  border-color: #f0b0b0;
+  color: #8a3a3a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  letter-spacing: 1px;
+}
+
+.picture-canvas {
+  /* Block-level inside the button so the natural ratio governs the
+     visual size; the button itself enforces aspect-ratio: 1. The
+     canvas backing store is set in JS to cssSize × dpr. */
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #ffffff;
+  border-radius: 6px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.tile-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--scene-fill);
+  color: #2b1810;
+  font-size: 14px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Subtle shadow so the badge reads on the white tile background. */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  pointer-events: none;
+}
+
+.scene-error {
+  color: #8a3a3a;
 }
 
 /* --- Paint stub --- */

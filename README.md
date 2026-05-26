@@ -99,20 +99,30 @@ Puzzle JSONs live at `public/content/room<N>/<id>.json` with schema
 `{ id, room, difficulty, w, h, palette, cells, colorCounts, paintableCells }`.
 
 `scripts/build-content-index.mjs` runs automatically via `npm predev`
-and `npm prebuild`, reading just the lightweight metadata (NOT the
-`cells` array) and writing `public/content/index.json`:
+and `npm prebuild`, producing two outputs:
 
-```json
-{
-  "maxRoom": 3,
-  "rooms": {
-    "1": [ { "id": "r1-001", "room": 1, "w": 4, "h": 4, "colors": 3, "paintableCells": 12 } ]
-  }
-}
-```
+1. `public/content/index.json` — slim home-screen index (no `cells`,
+   no thumbnails). Loaded once at app boot.
+   ```json
+   {
+     "maxRoom": 3,
+     "rooms": {
+       "1": [ { "id": "r1-001", "room": 1, "w": 4, "h": 4, "colors": 3, "paintableCells": 12 } ]
+     }
+   }
+   ```
 
-The app fetches `content/index.json` once at boot; full puzzle JSONs
-are loaded lazily by `loadPuzzle()` only when a picture is opened.
+2. `public/content/room<N>/thumbs.json` — per-room thumbnail bundle.
+   Each entry is the puzzle downscaled to longest-side ≤ 32 via
+   nearest-neighbour (aspect preserved, `-1` cells stay `-1`). Loaded
+   ONLY when room N is opened, used to paint the silhouettes /
+   full-colour previews in the room-interior grid.
+   ```json
+   { "r1-001": { "w": 4, "h": 4, "palette": ["#..."], "cells": [-1, 0, 0, ...] } }
+   ```
+
+Full puzzle JSONs (which carry the heavy `cells` array) are loaded
+lazily by `loadPuzzle()` only when a picture is opened for colouring.
 
 ### Progress & unlock rule
 
