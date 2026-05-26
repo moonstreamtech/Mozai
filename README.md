@@ -149,6 +149,29 @@ With `MOZAI_DEBUG=1` the JS console exposes
 `window.__mozaiDebug.markCompleted(id)` and `.resetProgress()` for
 verifying the % fill and lock progression without playing through.
 
+### On-screen boot diagnostics strip (temporary)
+
+`src/error-overlay.ts` ships an always-on-screen boot diagnostics
+strip that prints the boot sequence and post-mount layout probe
+(`#game` height, `--banner-h`, `.scene` rect, first-tile rect) on
+the device itself. It exists so a blank-screen failure can be
+debugged without `adb logcat`.
+
+It is **OFF by default**. To re-enable for a one-off device debug
+session, set the `VITE_BOOT_DEBUG` env var at build time:
+
+```sh
+VITE_BOOT_DEBUG=1 npm run build
+npx cap sync android
+```
+
+The red-panel error overlay (synchronous throw / unhandled rejection)
+stays armed regardless of this flag — only the always-visible strip
+is gated off.
+The `bootLog()` machinery itself is also unaffected: log lines still
+go to `console.info` and stay buffered, so a `reportError()` later
+in the boot still surfaces them in the error panel.
+
 ---
 
 ## Build, run, deploy

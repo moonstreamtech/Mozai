@@ -35,11 +35,15 @@ const bootStart = Date.now();
 
 function isBootDebugEnabled(): boolean {
   const v = import.meta.env.VITE_BOOT_DEBUG;
-  // Default ON: only DISABLE when the env var is explicitly set to
-  // a falsy literal. Keeps the diagnostic visible by default while
-  // we're still debugging blank-screen-on-device.
-  if (v === undefined) return true;
-  return v !== '0' && v !== 'false' && v !== '';
+  // Default OFF. The strip is a temporary diagnostic tool — leaving
+  // it on covers the top of the room grid. To re-enable for a one-
+  // off device debugging session:
+  //   VITE_BOOT_DEBUG=1 npm run build && npx cap sync android
+  // The error overlay (red panel on a real thrown error) is wired
+  // unconditionally in installErrorOverlay(), so a thrown exception
+  // still surfaces regardless of this flag.
+  if (v === undefined || v === '') return false;
+  return v !== '0' && v !== 'false';
 }
 
 // -------- error overlay --------
