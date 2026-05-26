@@ -29,6 +29,7 @@ import { SceneManager } from './scenes.js';
 import { roomsSceneMount } from './scene-rooms.js';
 import { makeRoomSceneMount } from './scene-room.js';
 import { makePaintSceneMount } from './scene-paint.js';
+import { setRewardedConfig } from './rewarded.js';
 
 function requireEl<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -81,6 +82,12 @@ async function boot(): Promise<void> {
     console.error('[Mozai] initBanner threw', err);
   });
 
+  // The rewarded module is stateless across the app lifetime — caching
+  // the config once at boot keeps every paint scene's hint button from
+  // re-reading env. Cleared in nothing for now; tests can re-call with
+  // a null to wipe.
+  setRewardedConfig(adConfig);
+
   // Content index + progress are independent and both small — load in
   // parallel so the first scene paint happens as soon as both settle.
   const [index] = await Promise.all([loadContentIndex(), loadProgress()]);
@@ -108,21 +115,38 @@ async function boot(): Promise<void> {
 
   // Debug helpers — only mounted when MOZAI_DEBUG is on. Lets a
   // developer mark pictures complete from the JS console to verify
-  // the % fill + lock progression without playing through the stub.
+  // the % fill + lock progression without playing through the stub,
+  // and to jump straight into a high-room puzzle (e.g. the 1000x1000
+  // performance test) without satisfying every lock between here and
+  // there.
   if (isDebugReadoutEnabled()) {
     interface MozaiDebug {
       markCompleted: (id: string) => Promise<void>;
       resetProgress: () => Promise<void>;
       reload: () => void;
+      openRoom: (roomN: number) => void;
+      openPicture: (id: string) => void;
     }
     (window as unknown as { __mozaiDebug: MozaiDebug }).__mozaiDebug = {
       markCompleted: debugMarkCompleted,
       resetProgress: debugReset,
       reload: () => window.location.reload(),
+      openRoom: (roomN: number) => scenes.push({ scene: 'room', roomN }),
+      openPicture: (id: string) => {
+        for (const list of Object.values(index.rooms)) {
+          const meta = list.find((m) => m.id === id);
+          if (meta) {
+            scenes.push({ scene: 'paint', meta });
+            return;
+          }
+        }
+        // eslint-disable-next-line no-console
+        console.warn(`[Mozai] openPicture: id '${id}' not found in any room`);
+      },
     };
     // eslint-disable-next-line no-console
     console.info(
-      '[Mozai] Debug helpers on window.__mozaiDebug — markCompleted(id), resetProgress(), reload().',
+      '[Mozai] Debug helpers on window.__mozaiDebug — markCompleted, resetProgress, reload, openRoom(N), openPicture(id).',
     );
   }
 }

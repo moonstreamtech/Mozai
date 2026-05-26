@@ -22,26 +22,36 @@
 export const ADMOB_TEST_PUBLISHER_PREFIX = 'ca-app-pub-3940256099942544';
 export const ADMOB_TEST_APP_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}~3347511713`;
 export const ADMOB_TEST_BANNER_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/6300978111`;
+// Reward-video test id (separate AdMob unit type — banner test id does
+// not work for rewarded format).
+export const ADMOB_TEST_REWARDED_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/5224354917`;
 
 type Mode = 'PRODUCTION' | 'TEST';
 
 export interface AdMobConfig {
   appId: string;
   bannerUnitId: string;
+  rewardedUnitId: string;
   mode: Mode;
 }
 
 /**
  * Read the AdMob configuration from build-time env. Empty / missing
- * values fall back to the official Google test ids.
+ * values fall back to the official Google test ids. The mode is
+ * promoted to PRODUCTION only when both real ids that the app
+ * actively requests at runtime (banner + rewarded) are present —
+ * otherwise we'd risk a release where the banner is real and the
+ * rewarded hint silently serves test ads (or vice versa).
  */
 export function readAdMobConfig(): AdMobConfig {
   const envAppId = (import.meta.env.MOZAI_ADMOB_APP_ID ?? '').trim();
   const envBanner = (import.meta.env.MOZAI_ADMOB_BANNER_UNIT_ID ?? '').trim();
-  const haveReal = envAppId !== '' && envBanner !== '';
+  const envRewarded = (import.meta.env.MOZAI_ADMOB_REWARDED_ID ?? '').trim();
+  const haveReal = envAppId !== '' && envBanner !== '' && envRewarded !== '';
   return {
     appId: haveReal ? envAppId : ADMOB_TEST_APP_ID,
     bannerUnitId: haveReal ? envBanner : ADMOB_TEST_BANNER_UNIT_ID,
+    rewardedUnitId: haveReal ? envRewarded : ADMOB_TEST_REWARDED_UNIT_ID,
     mode: haveReal ? 'PRODUCTION' : 'TEST',
   };
 }

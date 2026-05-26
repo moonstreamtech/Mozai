@@ -1,0 +1,245 @@
+/*
+ * Paint scene input.
+ *
+ * Mode contract:
+ *   1 finger down → start a paint stroke at the cell under the
+ *                  finger; subsequent move events paint each cell
+ *                  along the finger path (correct ones fill, wrong
+ *                  ones silently rejected by paint-state).
+ *   2 fingers     → cancel any in-flight paint stroke and switch to
+ *                  pan / pinch-zoom: the midpoint of the two fingers
+ *                  is the pan anchor; the change in finger distance
+ *                  drives zoom.
+ *   1 → 0         → end the paint stroke. The state's filledCount
+ *                  is checked by the scene for completion.
+ *
+ * Why pointer events: Capacitor's WebView delivers pointer events
+ * for both touch and mouse with the same API. Touch tap → mouse
+ * synthesis would lose multi-finger pinch and confuse the mode
+ * machine, so we work in pointer-event space.
+ */
+
+import type { PaintRenderer, CameraLimits } from './paint-render.js';
+import type { PaintState } from './paint-state.js';
+
+export interface PaintInputDeps {
+  canvas: HTMLCanvasElement;
+  renderer: PaintRenderer;
+  state: PaintState;
+  /** Currently selected palette index, or -1 if none. */
+  getSelectedColor: () => number;
+  /**
+   * Called whenever a cell is successfully filled. Lets the scene
+   * update the palette swatch percentages, the overall %, and
+   * react to puzzle completion.
+   */
+  onCellFilled: (cellIndex: number, colorIndex: number, completed: boolean) => void;
+  limits: () => CameraLimits;
+}
+
+type ActivePointer = { id: number; x: number; y: number };
+
+export class PaintInput {
+  private readonly deps: PaintInputDeps;
+  private readonly pointers = new Map<number, ActivePointer>();
+  /** True iff a single-finger paint stroke is in progress. */
+  private painting = false;
+  /** Cells already attempted during the current stroke (avoid retrying). */
+  private strokeAttempted = new Set<number>();
+  /** Pinch-zoom baseline: distance between the two pointers at gesture start. */
+  private pinchStartDist = 0;
+  private pinchStartZoom = 1;
+  /** Pan baseline (cells) at gesture start. */
+  private panStartOffsetX = 0;
+  private panStartOffsetY = 0;
+  /** Midpoint of two pointers at gesture start (CSS px, canvas-local). */
+  private gestureStartMidX = 0;
+  private gestureStartMidY = 0;
+  /** Bound listener refs for clean removal. */
+  private readonly onDown: (e: PointerEvent) => void;
+  private readonly onMove: (e: PointerEvent) => void;
+  private readonly onUp: (e: PointerEvent) => void;
+  private readonly onWheel: (e: WheelEvent) => void;
+
+  constructor(deps: PaintInputDeps) {
+    this.deps = deps;
+    this.onDown = this.handleDown.bind(this);
+    this.onMove = this.handleMove.bind(this);
+    this.onUp = this.handleUp.bind(this);
+    this.onWheel = this.handleWheel.bind(this);
+    deps.canvas.addEventListener('pointerdown', this.onDown);
+    deps.canvas.addEventListener('pointermove', this.onMove);
+    deps.canvas.addEventListener('pointerup', this.onUp);
+    deps.canvas.addEventListener('pointercancel', this.onUp);
+    deps.canvas.addEventListener('pointerleave', this.onUp);
+    // Desktop / browser preview: mouse wheel zooms in/out around the
+    // cursor. Mobile pinch is handled via pointer events above.
+    deps.canvas.addEventListener('wheel', this.onWheel, { passive: false });
+    // Disable browser-native touch panning / pinch — we own those.
+    deps.canvas.style.touchAction = 'none';
+  }
+
+  dispose(): void {
+    const { canvas } = this.deps;
+    canvas.removeEventListener('pointerdown', this.onDown);
+    canvas.removeEventListener('pointermove', this.onMove);
+    canvas.removeEventListener('pointerup', this.onUp);
+    canvas.removeEventListener('pointercancel', this.onUp);
+    canvas.removeEventListener('pointerleave', this.onUp);
+    canvas.removeEventListener('wheel', this.onWheel);
+  }
+
+  private getLocalPos(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    const rect = this.deps.canvas.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  private handleDown(e: PointerEvent): void {
+    const pos = this.getLocalPos(e);
+    this.pointers.set(e.pointerId, { id: e.pointerId, x: pos.x, y: pos.y });
+    this.deps.canvas.setPointerCapture(e.pointerId);
+
+    if (this.pointers.size === 1) {
+      // Start a paint stroke immediately on first touch so the cell
+      // tapped on a quick tap-and-release also fills.
+      this.painting = this.deps.getSelectedColor() >= 0;
+      this.strokeAttempted.clear();
+      if (this.painting) {
+        this.attemptCellAt(pos.x, pos.y);
+      }
+    } else if (this.pointers.size === 2) {
+      // Two fingers: cancel any in-flight paint and lock into pan/zoom.
+      this.painting = false;
+      this.strokeAttempted.clear();
+      this.beginPanZoom();
+    }
+    // 3+ fingers: ignore — pan/zoom uses the first two and the rest
+    // are observers. handleMove handles whichever pair shows up.
+    e.preventDefault();
+  }
+
+  private handleMove(e: PointerEvent): void {
+    const p = this.pointers.get(e.pointerId);
+    if (!p) return;
+    const pos = this.getLocalPos(e);
+    p.x = pos.x;
+    p.y = pos.y;
+
+    if (this.pointers.size === 1 && this.painting) {
+      this.attemptCellAt(pos.x, pos.y);
+    } else if (this.pointers.size >= 2) {
+      this.applyPanZoom();
+    }
+    e.preventDefault();
+  }
+
+  private handleUp(e: PointerEvent): void {
+    if (!this.pointers.has(e.pointerId)) return;
+    this.pointers.delete(e.pointerId);
+    try {
+      this.deps.canvas.releasePointerCapture(e.pointerId);
+    } catch {
+      // Already released — fine.
+    }
+    if (this.pointers.size < 2) {
+      // Leaving pan/zoom either fully or back to one-finger. Either way,
+      // re-prime so the remaining finger does NOT silently resume paint
+      // (would surprise the user, who was probably mid-pan and lifted
+      // one finger by accident).
+      this.painting = false;
+      this.strokeAttempted.clear();
+      if (this.pointers.size === 1) {
+        // Re-arm pan from the remaining finger as the new anchor in
+        // case the second finger comes back down (rare, but smooths
+        // the transition).
+        const remaining = Array.from(this.pointers.values())[0];
+        this.gestureStartMidX = remaining.x;
+        this.gestureStartMidY = remaining.y;
+        this.panStartOffsetX = this.deps.renderer.camera.offsetX;
+        this.panStartOffsetY = this.deps.renderer.camera.offsetY;
+      }
+    }
+    e.preventDefault();
+  }
+
+  private handleWheel(e: WheelEvent): void {
+    e.preventDefault();
+    const pos = this.getLocalPos(e);
+    // Negative deltaY = scroll up = zoom in (matches Google Maps).
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.zoomAround(pos.x, pos.y, factor);
+  }
+
+  private beginPanZoom(): void {
+    const ps = Array.from(this.pointers.values());
+    const [a, b] = ps;
+    this.pinchStartDist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    this.pinchStartZoom = this.deps.renderer.camera.zoom;
+    this.gestureStartMidX = (a.x + b.x) / 2;
+    this.gestureStartMidY = (a.y + b.y) / 2;
+    this.panStartOffsetX = this.deps.renderer.camera.offsetX;
+    this.panStartOffsetY = this.deps.renderer.camera.offsetY;
+  }
+
+  private applyPanZoom(): void {
+    const ps = Array.from(this.pointers.values()).slice(0, 2);
+    if (ps.length < 2) return;
+    const [a, b] = ps;
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    const dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const desiredZoom = this.pinchStartZoom * (dist / this.pinchStartDist);
+    const limits = this.deps.limits();
+    const newZoom = clamp(desiredZoom, limits.minZoom, limits.maxZoom);
+
+    // World coordinate that was under the gesture midpoint at start —
+    // we keep it pinned under the moving midpoint as zoom changes.
+    const worldX = this.panStartOffsetX + this.gestureStartMidX / this.pinchStartZoom;
+    const worldY = this.panStartOffsetY + this.gestureStartMidY / this.pinchStartZoom;
+    this.deps.renderer.camera.zoom = newZoom;
+    this.deps.renderer.camera.offsetX = worldX - midX / newZoom;
+    this.deps.renderer.camera.offsetY = worldY - midY / newZoom;
+    this.deps.renderer.scheduleFrame();
+  }
+
+  /**
+   * Zoom around a screen point — used for wheel zoom and the +/- UI
+   * buttons. Keeps the cell currently under the anchor stationary.
+   */
+  zoomAround(screenX: number, screenY: number, factor: number): void {
+    const cam = this.deps.renderer.camera;
+    const limits = this.deps.limits();
+    const newZoom = clamp(cam.zoom * factor, limits.minZoom, limits.maxZoom);
+    if (newZoom === cam.zoom) return;
+    const worldX = cam.offsetX + screenX / cam.zoom;
+    const worldY = cam.offsetY + screenY / cam.zoom;
+    cam.zoom = newZoom;
+    cam.offsetX = worldX - screenX / newZoom;
+    cam.offsetY = worldY - screenY / newZoom;
+    this.deps.renderer.scheduleFrame();
+  }
+
+  /** Centre-anchored zoom (for the +/- UI buttons). */
+  zoomCentered(factor: number): void {
+    const r = this.deps.canvas.getBoundingClientRect();
+    this.zoomAround(r.width / 2, r.height / 2, factor);
+  }
+
+  private attemptCellAt(screenX: number, screenY: number): void {
+    const cell = this.deps.renderer.screenToCell(screenX, screenY);
+    if (cell < 0) return;
+    if (this.strokeAttempted.has(cell)) return;
+    this.strokeAttempted.add(cell);
+    const colorIdx = this.deps.getSelectedColor();
+    if (colorIdx < 0) return;
+    const result = this.deps.state.attemptFill(cell, colorIdx);
+    if (result.changed) {
+      this.deps.renderer.updateCellFilled(cell);
+      this.deps.onCellFilled(cell, colorIdx, result.completed);
+    }
+  }
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return v < lo ? lo : v > hi ? hi : v;
+}
