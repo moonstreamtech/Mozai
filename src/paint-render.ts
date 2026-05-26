@@ -173,12 +173,16 @@ export class PaintRenderer {
    * resolution into the visible canvas at the camera transform. The
    * compositor handles the scaling. We do clip to the visible
    * rectangle (so off-screen cells are never touched).
+   *
+   * Returns true if a frame was actually painted (canvas had a real
+   * size); false otherwise. Callers can use this to schedule a
+   * retry once layout has settled.
    */
-  draw(): void {
+  draw(): boolean {
     const { ctx, canvas, camera } = this;
     const cssW = canvas.clientWidth;
     const cssH = canvas.clientHeight;
-    if (cssW === 0 || cssH === 0) return;
+    if (cssW === 0 || cssH === 0) return false;
     const dpr = window.devicePixelRatio || 1;
     const bsW = Math.max(1, Math.round(cssW * dpr));
     const bsH = Math.max(1, Math.round(cssH * dpr));
@@ -198,14 +202,78 @@ export class PaintRenderer {
     const dstW = this.state.puzzle.w * pxPerCell;
     const dstH = this.state.puzzle.h * pxPerCell;
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
+
+    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
+    this.framesPainted++;
+    return true;
+  }
+
+  /** Total frames the renderer has actually painted. Diagnostic. */
+  framesPainted = 0;
+
+  /**
+   * Faint per-cell gridlines so unpainted cells are visible to tap.
+   * Skipped when cells are too small (~< 4 backing px per cell) to
+   * avoid a solid-grey wash at extreme zoom-out on huge grids.
+   * Lines are drawn in CSS-pixel-scaled coordinates (.5 offset to
+   * keep 1-device-pixel strokes crisp).
+   */
+  private drawGridlines(bsW: number, bsH: number, pxPerCell: number, dstX: number, dstY: number): void {
+    if (pxPerCell < 4) return;
+    const { ctx, state, camera } = this;
+    const dpr = window.devicePixelRatio || 1;
+    const puzzleW = state.puzzle.w;
+    const puzzleH = state.puzzle.h;
+    // Visible cell range — only stroke lines that intersect the
+    // canvas viewport. Adding +1 on both ends ensures the edge
+    // lines on the boundary cells are included.
+    const cellsAcross = bsW / pxPerCell;
+    const cellsDown = bsH / pxPerCell;
+    const cx0 = Math.max(0, Math.floor(camera.offsetX));
+    const cx1 = Math.min(puzzleW, Math.ceil(camera.offsetX + cellsAcross) + 1);
+    const cy0 = Math.max(0, Math.floor(camera.offsetY));
+    const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.12)';
+    ctx.lineWidth = Math.max(1, Math.round(dpr));
+    ctx.beginPath();
+    // Vertical lines.
+    for (let cx = cx0; cx <= cx1; cx++) {
+      const px = Math.round(dstX + cx * pxPerCell) + 0.5;
+      const yStart = Math.max(0, Math.round(dstY));
+      const yEnd = Math.min(bsH, Math.round(dstY + puzzleH * pxPerCell));
+      ctx.moveTo(px, yStart);
+      ctx.lineTo(px, yEnd);
+    }
+    // Horizontal lines.
+    for (let cy = cy0; cy <= cy1; cy++) {
+      const py = Math.round(dstY + cy * pxPerCell) + 0.5;
+      const xStart = Math.max(0, Math.round(dstX));
+      const xEnd = Math.min(bsW, Math.round(dstX + puzzleW * pxPerCell));
+      ctx.moveTo(xStart, py);
+      ctx.lineTo(xEnd, py);
+    }
+    ctx.stroke();
   }
 
   /**
    * Pick a sensible initial camera so the whole puzzle just fits the
-   * visible canvas with a small margin. Call after the canvas has
-   * its CSS box.
+   * visible canvas with a small margin. CONTAIN fit: scale =
+   * min(viewportW / imgW, viewportH / imgH), so the picture fills
+   * its limiting axis edge-to-edge (width when the puzzle is square
+   * or wider than the viewport's aspect, height when taller). The
+   * resulting fitZoom is also the MIN ZOOM — the user can pinch in
+   * but not out past full visibility on the limiting axis.
+   *
+   * marginCss=8 keeps the picture a hair off the very edges of the
+   * viewport so it doesn't visually touch the topbar / palette
+   * borders. Set to 0 if true edge-to-edge is preferred later.
+   *
+   * Returns false (no-op) when the canvas hasn't been laid out yet
+   * (clientWidth/Height === 0). The caller is expected to call
+   * fitToScreen again from a ResizeObserver once layout settles.
    */
-  fitToScreen(marginCss = 16): CameraLimits {
+  fitToScreen(marginCss = 8): CameraLimits {
     const cssW = Math.max(1, this.canvas.clientWidth - marginCss * 2);
     const cssH = Math.max(1, this.canvas.clientHeight - marginCss * 2);
     const zX = cssW / this.state.puzzle.w;
@@ -218,8 +286,9 @@ export class PaintRenderer {
     this.camera.offsetX = (this.state.puzzle.w - visibleCellsW) / 2;
     this.camera.offsetY = (this.state.puzzle.h - visibleCellsH) / 2;
     this.scheduleFrame();
-    // Limits: never zoom out beyond fit (no point seeing void), allow
-    // zoom in up to ~48 CSS px per cell which is comfortably tappable.
+    // Limits: minZoom = fitZoom locks the zoom-OUT floor at fit, so
+    // the user cannot zoom past "fully visible on the limiting
+    // axis". maxZoom ~48 CSS px per cell is comfortably tappable.
     return { minZoom: fitZoom, maxZoom: 48 };
   }
 

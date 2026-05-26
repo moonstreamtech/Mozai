@@ -223,6 +223,8 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
 
         // Re-fit on container resize (banner height changes, rotation,
         // keyboard) so the picture always fills the viewport sensibly.
+        // Also confirm-paint diagnostic: log canvas + viewport sizes
+        // on every fit so we can prove the first frame ran.
         resizeObserver = new ResizeObserver(() => {
           if (!renderer) return;
           // Preserve current zoom unless we'd fall below minZoom in
@@ -234,13 +236,44 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
             renderer.camera.zoom = Math.min(oldZoom, newLimits.maxZoom);
           }
           limits = newLimits;
-          renderer.scheduleFrame();
+          // Synchronous draw so the next frame paints with the new
+          // size; scheduleFrame would defer to rAF, but the first
+          // post-mount fit needs to land NOW to clear the loading
+          // overlay below.
+          const painted = renderer.draw();
+          const viewportEl = root.querySelector<HTMLDivElement>('.paint-viewport');
+          const vRect = viewportEl?.getBoundingClientRect();
+          diagLog(
+            `paint fit: canvas client=${canvas.clientWidth}x${canvas.clientHeight} ` +
+              `backing=${canvas.width}x${canvas.height} ` +
+              `viewport=${vRect?.width.toFixed(0) ?? '?'}x${vRect?.height.toFixed(0) ?? '?'} ` +
+              `zoom=${renderer.camera.zoom.toFixed(2)} ` +
+              `fitMin=${newLimits.minZoom.toFixed(2)} ` +
+              `painted=${painted} frames=${renderer.framesPainted}`,
+          );
+          if (painted) {
+            loadingEl.hidden = true;
+          }
         });
         resizeObserver.observe(root.querySelector('.paint-viewport')!);
 
         renderPalette();
         updateOverall();
-        loadingEl.hidden = true;
+        // Try one synchronous draw — when the viewport already has a
+        // CSS size (common in dev), the ResizeObserver may not fire
+        // a follow-up callback and we'd be left with the loading
+        // overlay covering a paintable canvas. Only hide the loading
+        // overlay AFTER a successful paint (painted === true) so a
+        // collapsed-viewport case stays visible until layout settles.
+        const initialPainted = renderer.draw();
+        diagLog(
+          `paint init: canvas client=${canvas.clientWidth}x${canvas.clientHeight} ` +
+            `backing=${canvas.width}x${canvas.height} ` +
+            `painted=${initialPainted} frames=${renderer.framesPainted}`,
+        );
+        if (initialPainted) {
+          loadingEl.hidden = true;
+        }
 
         // Load is finished — completion modal is now allowed to fire
         // from a real fill OR (if the saved progress is already at

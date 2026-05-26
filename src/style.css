@@ -32,19 +32,20 @@
 
 :root {
   /*
-   * Banner reservation. Default to a sensible 60 CSS px (typical
-   * anchored adaptive banner height on a phone) PLUS bottom safe-
-   * area. The banner module overwrites this with the SDK-reported
-   * pixel height + safe-area once a banner ad loads. We start at 60
-   * + safe-area rather than 0 + safe-area because:
+   * Banner reservation. Default 80 CSS px + bottom safe-area is a
+   * generous baseline for the typical anchored adaptive banner
+   * (50-70dp on phones, 90dp on tablets). The banner module
+   * (banner.ts) overwrites this with the SDK-reported pixel
+   * height + safe-area once a banner ad actually loads. We start
+   * at a sensible non-zero default because:
    *   - The native AdMob banner overlays the WebView and does NOT
-   *     push content up. A default of 0 makes #game extend behind
-   *     the banner before the SDK reports.
-   *   - On WebViews where the bannerSize event never fires (no Play
-   *     Services, no fill, ad blocker), the 60px reservation is
-   *     still correct.
+   *     push content up. A default that's too small lets #game
+   *     and the paint scene's palette extend BEHIND the banner.
+   *   - On WebViews where the bannerSize event never fires (no
+   *     Play Services, no fill, ad blocker), this default is the
+   *     forever-value.
    */
-  --banner-h: calc(60px + env(safe-area-inset-bottom, 0px));
+  --banner-h: calc(80px + env(safe-area-inset-bottom, 0px));
 
   /*
    * Brand palette — placeholder values. Will be replaced when the
@@ -627,8 +628,20 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  padding: 0;
   background: var(--scene-bg);
+  /*
+   * Banner reservation. #game's height already excludes --banner-h,
+   * but on devices where the actual native AdMob banner is taller
+   * than our reserved --banner-h (e.g. tablets where banners are
+   * 90dp vs our 80dp default before bannerSize event resolves),
+   * #game's bottom extends INTO the banner and the palette ends
+   * up behind it. Adding env(safe-area-inset-bottom) here as
+   * padding-bottom buys a small floor of gesture-nav clearance
+   * without doubling --banner-h (which would leave a visible gap
+   * in the common case). The palette / Hint / completion chrome
+   * therefore stay tappable above the banner.
+   */
+  padding: 0 0 env(safe-area-inset-bottom, 0px) 0;
 }
 
 .paint-topbar {
@@ -754,6 +767,19 @@ body {
   color: var(--scene-muted);
   font-size: 13px;
   z-index: 3;
+}
+
+/*
+ * Same [hidden]-attribute fix as .paint-completion: `display: flex`
+ * above wins over UA's [hidden] { display: none }, so without this
+ * rule the JS `loadingEl.hidden = true` toggle has no effect and
+ * the "Loading puzzle…" overlay covers the canvas forever — the
+ * actual cause of the user-reported "canvas never renders, stuck
+ * on Loading" symptom. The attribute selector gives the [hidden]
+ * variant higher specificity (class+attr), so this wins.
+ */
+.paint-loading[hidden] {
+  display: none;
 }
 
 .paint-palette {
