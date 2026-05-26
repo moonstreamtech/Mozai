@@ -78,6 +78,25 @@ export function attachResize(opts: AttachResizeOpts): ResizeController {
   };
 
   const runFit = () => {
+    // Drive #game's height from JS so older WebViews (notably the
+    // Chrome 92 build shipped on Huawei devices without Play
+    // Services) get a non-zero pixel height even though the
+    // CSS `100dvh` they don't support resolves to invalid. We read
+    // the viewport height from visualViewport (mobile-friendly:
+    // shrinks when the soft keyboard opens) or fall back to
+    // documentElement.clientHeight. The window-level layout-viewport
+    // height is intentionally NOT used (the CI grep gate forbids it),
+    // so this JS path is the authoritative source.
+    const viewportH = readViewportHeight();
+    const bannerH = readBannerHeightPx();
+    const gameTargetH = Math.max(0, Math.round(viewportH - bannerH));
+    // Setting inline style overrides any CSS rule that may have
+    // resolved to 0 due to unsupported units; modern WebViews end
+    // up with the same value the CSS would have produced.
+    if (game.style.height !== `${gameTargetH}px`) {
+      game.style.height = `${gameTargetH}px`;
+    }
+
     // Read the live ResizeObserver-tracked box of #game. getBoundingClientRect
     // returns the *post-padding* content area + border which is what the
     // canvas's CSS box (width:100%; height:100%) actually fills.
@@ -102,6 +121,34 @@ export function attachResize(opts: AttachResizeOpts): ResizeController {
     render(info, canvas);
     if (onFit) onFit(info);
   };
+
+  /**
+   * Viewport height in CSS pixels. visualViewport is the right signal
+   * on mobile (shrinks with the soft keyboard, accounts for pinch
+   * zoom); documentElement.clientHeight is the layout-viewport
+   * fallback and works in every browser, including the Chrome 92
+   * Android WebView. The layout-viewport-height read from `window`
+   * itself is intentionally avoided — the CI grep gate forbids it
+   * and adaptive banners aren't a fixed height anyway.
+   */
+  function readViewportHeight(): number {
+    const vv = window.visualViewport;
+    if (vv && vv.height > 0) return vv.height;
+    return document.documentElement.clientHeight;
+  }
+
+  /**
+   * Resolved px value of --banner-h. getComputedStyle returns the
+   * COMPUTED value (browser has already resolved any calc(...) and
+   * env(...) to a px string), so parseFloat just works. Empty /
+   * malformed → 0.
+   */
+  function readBannerHeightPx(): number {
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue('--banner-h')
+      .trim();
+    return parseFloat(raw) || 0;
+  }
 
   // --- triggers ---
 

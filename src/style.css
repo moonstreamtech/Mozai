@@ -32,13 +32,19 @@
 
 :root {
   /*
-   * --banner-h defaults to env(safe-area-inset-bottom) alone so the
-   * play area never overlaps the gesture nav even in the half-second
-   * before banner.ts reports a height. banner.ts overwrites this with
-   *   measuredBannerPx + env(safe-area-inset-bottom)
-   * once the AdMob SDK (or the placeholder strip) settles.
+   * Banner reservation. Default to a sensible 60 CSS px (typical
+   * anchored adaptive banner height on a phone) PLUS bottom safe-
+   * area. The banner module overwrites this with the SDK-reported
+   * pixel height + safe-area once a banner ad loads. We start at 60
+   * + safe-area rather than 0 + safe-area because:
+   *   - The native AdMob banner overlays the WebView and does NOT
+   *     push content up. A default of 0 makes #game extend behind
+   *     the banner before the SDK reports.
+   *   - On WebViews where the bannerSize event never fires (no Play
+   *     Services, no fill, ad blocker), the 60px reservation is
+   *     still correct.
    */
-  --banner-h: env(safe-area-inset-bottom, 0px);
+  --banner-h: calc(60px + env(safe-area-inset-bottom, 0px));
 
   /*
    * Brand palette — placeholder values. Will be replaced when the
@@ -102,7 +108,25 @@ body {
   left: 0;
   right: 0;
   width: 100%;
-  height: calc(100dvh - var(--banner-h));
+  /*
+   * Height fallback chain. Chrome 92 (the Huawei WebView without
+   * Play Services) does NOT support the `dvh` unit, so
+   * `calc(100dvh - var(--banner-h))` silently resolves to invalid
+   * and #game collapses to 0. We layer two CSS rules:
+   *
+   *   height: 100vh;   — supported everywhere; ignores mobile URL-
+   *                      bar changes but never resolves to 0.
+   *   height: 100dvh;  — overrides on Chrome 108+ where supported.
+   *
+   * The resize controller in resize.ts then SETS an inline pixel
+   * value (viewport height − --banner-h, read from visualViewport
+   * or documentElement.clientHeight — never from the window-level
+   * layout-viewport height, per the CI grep gate). The inline style
+   * overrides both CSS rules, so this fallback chain only matters
+   * for the very first frame before resize.ts runs.
+   */
+  height: 100vh;
+  height: 100dvh;
   padding-top: env(safe-area-inset-top, 0px);
   padding-left: env(safe-area-inset-left, 0px);
   padding-right: env(safe-area-inset-right, 0px);
@@ -187,11 +211,14 @@ body {
    * env(safe-area-inset-top)`, but because we use `inset: 0` here
    * the scene fills #game's PADDING BOX — i.e. it ends up positioned
    * inside #game's padding-top, not below it. We compensate by also
-   * applying the top safe-area inset here, plus --boot-strip-h so
-   * the scene clears the always-on-top boot diagnostics strip.
-   * --boot-strip-h is set by error-overlay.ts to the strip's actual
-   * pixel height and removed when the strip isn't mounted, so this
-   * collapses cleanly back to safe-area-top when boot debug is off.
+   * applying the top safe-area inset here.
+   *
+   * The boot debug strip is a position:fixed overlay that COVERS
+   * the very top of the scene while debugging. It deliberately does
+   * NOT push the scene content down — eating 200+ px out of a
+   * ~270 px viewport (as observed on device) left the room grid
+   * unviewable. The strip is temporary; user can scroll past where
+   * it covers, and once VITE_BOOT_DEBUG is off the strip is gone.
    */
   position: absolute;
   inset: 0;
@@ -199,9 +226,9 @@ body {
   color: var(--scene-ink);
   overflow-y: auto;
   overflow-x: hidden;
-  padding-top: calc(14px + env(safe-area-inset-top, 0px) + var(--boot-strip-h, 0px));
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
   padding-right: calc(14px + env(safe-area-inset-right, 0px));
-  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: 14px;
   padding-left: calc(14px + env(safe-area-inset-left, 0px));
   -webkit-overflow-scrolling: touch;
 }
@@ -608,10 +635,9 @@ body {
   padding: 8px 12px;
   border-bottom: 1px solid var(--scene-border);
   background: var(--scene-bg);
-  /* Top safe-area + (temporary) boot-strip clearance. --boot-strip-h
-     collapses to 0 when the strip isn't mounted, so this is a no-op
-     in production once VITE_BOOT_DEBUG is turned off. */
-  padding-top: calc(8px + env(safe-area-inset-top, 0px) + var(--boot-strip-h, 0px));
+  /* Top safe-area only — the boot strip is a position:fixed overlay
+     that does not push scene content (see .scene comment). */
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
   padding-left: calc(12px + env(safe-area-inset-left, 0px));
   padding-right: calc(12px + env(safe-area-inset-right, 0px));
 }
