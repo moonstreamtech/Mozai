@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Color resources. styles.xml references @color/colorPrimary etc.
+    via the AppTheme base; before this file they were resolving to
+    AppCompat defaults. We add explicit values now mostly to define
+    splashBackground for the centered launch drawable.
+-->
+<resources>
+    <!-- AppCompat theme accent colours — taken from the
+         Material Indigo palette for sane defaults until brand
+         colours are picked. -->
+    <color name="colorPrimary">#3F51B5</color>
+    <color name="colorPrimaryDark">#303F9F</color>
+    <color name="colorAccent">#FF4081</color>
+    <!-- Splash background colour. The launch logo is drawn centered
+         on top of this fill; pick a neutral tone close to the
+         splash image's own background so any rounding edge between
+         the bitmap and this layer is invisible. -->
+    <color name="splashBackground">#FFFFFF</color>
+</resources>

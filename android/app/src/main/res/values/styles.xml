@@ -17,6 +17,13 @@
 
 
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+        <!--
+            Use the layer-list splash_centered.xml instead of the raw
+            @drawable/splash bitmap. The bitmap inside the layer-list
+            sets android:gravity="center" so the launch logo keeps
+            its native 1:1 aspect ratio instead of being stretched to
+            fill the screen.
+        -->
+        <item name="android:background">@drawable/splash_centered</item>
     </style>
 </resources>

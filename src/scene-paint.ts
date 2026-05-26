@@ -37,6 +37,7 @@ import { PaintState } from './paint-state.js';
 import { PaintRenderer, type CameraLimits } from './paint-render.js';
 import { PaintInput } from './paint-input.js';
 import { showRewarded } from './rewarded.js';
+import { diagLog } from './error-overlay.js';
 
 const SAVE_DEBOUNCE_MS = 400;
 
@@ -92,6 +93,14 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     let saveTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
+    // Hardening: the completion modal MUST NOT fire during initial
+    // load. Set true once the puzzle has been fully parsed AND
+    // restored from saved state. attemptFill / onCellFilled are only
+    // ever wired after load anyway (the linear flow below), so this
+    // is a belt-and-braces guard against any future refactor that
+    // accidentally lets `state.snapshot().complete` short-circuit
+    // before the picture is paintable.
+    let loadFinished = false;
 
     const onBack = () => doBack(ctx);
     back.addEventListener('click', onBack);
@@ -131,28 +140,58 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     loadPuzzle(meta)
       .then(async (puzzle) => {
         if (cancelled) return;
+
+        // Rich pre-construction diagnostic so a malformed puzzle is
+        // visible on device via the debug popup (and console). We
+        // inspect the RAW cells field to catch the exotic failure
+        // modes the previous guard couldn't reach — e.g. cells
+        // arrived as a string, or as an array of strings, or
+        // length-0, or all-(-1). Counting non-negative entries here
+        // gives the TRUE paintable count, which we cross-check
+        // against PaintState's computed value below.
+        const cells = puzzle.cells as unknown;
+        const cellsIsArray = Array.isArray(cells);
+        const cellsType = cellsIsArray ? 'array' : typeof cells;
+        const cellsLen = cellsIsArray ? (cells as unknown[]).length : -1;
+        let rawBg = 0;
+        let rawPaint = 0;
+        if (cellsIsArray) {
+          for (const v of cells as unknown[]) {
+            const n = typeof v === 'number' ? v : Number(v);
+            if (Number.isFinite(n) && n < 0) rawBg++;
+            else if (Number.isFinite(n) && n >= 0) rawPaint++;
+          }
+        }
+        diagLog(
+          `paint entry id=${puzzle.id} ` +
+            `cells.type=${cellsType} cells.length=${cellsLen} w*h=${puzzle.w * puzzle.h} ` +
+            `#(-1)=${rawBg} #(>=0)=${rawPaint} ` +
+            `palette.length=${puzzle.palette.length} ` +
+            `paintableCells(json)=${puzzle.paintableCells}`,
+        );
+
         state = new PaintState(puzzle);
         await state.load();
         if (cancelled) return;
 
         const snap = state.snapshot();
-        // Diagnostic — surfaces malformed puzzles (paintableCount=0
-        // would have triggered an instant "Complete!" before the
-        // guard in paint-state.isComplete() landed). Logs the raw
-        // file-reported paintableCells too so we can tell whether
-        // the malformation came from the JSON or from the loader.
-        // eslint-disable-next-line no-console
-        console.info(
-          `[Mozai] picture ${puzzle.id}: ${puzzle.w}×${puzzle.h}, ` +
-            `palette=${puzzle.palette.length}, ` +
-            `paintableCells(json)=${puzzle.paintableCells}, ` +
-            `paintableCount(computed)=${snap.paintableCount}, ` +
-            `filledCount=${snap.filledCount}, complete=${snap.complete}`,
+        diagLog(
+          `paint state id=${puzzle.id} ` +
+            `paintableCount(computed)=${snap.paintableCount} ` +
+            `filledCount=${snap.filledCount} ` +
+            `complete=${snap.complete}`,
         );
         if (snap.paintableCount === 0) {
-          // eslint-disable-next-line no-console
-          console.warn(
-            `[Mozai] picture ${puzzle.id} has paintableCount=0 — treating as malformed, NOT complete.`,
+          diagLog(
+            `WARNING paintableCount=0 for ${puzzle.id} — treating as malformed, NOT firing completion.`,
+          );
+        }
+        if (rawPaint !== snap.paintableCount) {
+          // Cross-check: if PaintState's computed count disagrees
+          // with our raw scan, something is up. Log loudly so we
+          // can see it on device.
+          diagLog(
+            `WARNING paintable mismatch: raw scan=${rawPaint} vs PaintState=${snap.paintableCount} for ${puzzle.id}`,
           );
         }
 
@@ -173,7 +212,12 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
             if (state && state.colorFilled[colorIdx] >= state.colorTotal[colorIdx]) {
               maybeDropSwatch(colorIdx);
             }
-            if (completed) onPuzzleCompleted();
+            // Belt-and-braces: never fire the completion modal until
+            // the puzzle has finished loading. Today the PaintInput
+            // is only constructed AFTER load so this can only fire
+            // post-load, but a future refactor that pre-wires the
+            // input would be silently caught here.
+            if (completed && loadFinished) onPuzzleCompleted();
           },
         });
 
@@ -197,10 +241,17 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         renderPalette();
         updateOverall();
         loadingEl.hidden = true;
-        // Pre-select the first available colour so the user can paint
-        // without an extra tap. If everything's already complete on
-        // resume we surface the completion overlay immediately.
-        if (state.snapshot().complete) {
+
+        // Load is finished — completion modal is now allowed to fire
+        // from a real fill OR (if the saved progress is already at
+        // 100%) from this resume-time check. Setting the flag BEFORE
+        // the snapshot check lets a legitimate resume show the
+        // completion overlay; future fills also gate on this flag
+        // via onCellFilled below.
+        loadFinished = true;
+        const finalSnap = state.snapshot();
+        if (finalSnap.complete) {
+          // Resume of an already-completed picture — show the modal.
           onPuzzleCompleted();
         } else {
           const first = firstAvailableColor();
