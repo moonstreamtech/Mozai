@@ -105,13 +105,14 @@ function buildRoomCell(n: number, ctx: SceneContext): HTMLElement {
   );
 
   // Inner DOM order matters for layering: fill must be the first
-  // child so the number + glyph sit on top via CSS `position: relative`
-  // + the fill being absolute.
+  // child so the number sits on top via CSS `position: relative` +
+  // the fill being absolute. The lock/unlock distinction is conveyed
+  // by colour contrast alone (locked = dimmed grey number on grey
+  // background) — no glyph; see .room-cell.is-locked in style.css.
   cell.innerHTML = `
     <span class="room-fill" style="height: ${pct}%"></span>
     <span class="room-number">${n}</span>
     <span class="room-progress">${done}/${total}</span>
-    ${unlocked ? '' : '<span class="room-lock" aria-hidden="true">🔒</span>'}
   `;
 
   if (unlocked) {

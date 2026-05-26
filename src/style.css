@@ -213,12 +213,23 @@ body {
    * inside #game's padding-top, not below it. We compensate by also
    * applying the top safe-area inset here.
    *
+   * NOTE on bottom padding: #game's height is viewport − --banner-h,
+   * so the scene's bottom edge is already at the top of the native
+   * AdMob banner. But adaptive banners are device-dependent and our
+   * default --banner-h (60 + safe-area) is just an estimate until
+   * the SDK reports the real height. Adding --banner-h to the
+   * scrollable area's padding-bottom gives the user a guaranteed
+   * clearance: the last row of the room grid stays comfortably
+   * above the banner even when the reservation underestimates the
+   * actual banner pixel size by a few dp. This is a defensive
+   * over-reservation; the cost is a small blank strip at the
+   * bottom of the scroll, which is invisible until the user
+   * scrolls to the very end.
+   *
    * The boot debug strip is a position:fixed overlay that COVERS
    * the very top of the scene while debugging. It deliberately does
-   * NOT push the scene content down — eating 200+ px out of a
-   * ~270 px viewport (as observed on device) left the room grid
-   * unviewable. The strip is temporary; user can scroll past where
-   * it covers, and once VITE_BOOT_DEBUG is off the strip is gone.
+   * NOT push the scene content down. The strip is OFF by default
+   * (VITE_BOOT_DEBUG=0).
    */
   position: absolute;
   inset: 0;
@@ -228,7 +239,7 @@ body {
   overflow-x: hidden;
   padding-top: calc(14px + env(safe-area-inset-top, 0px));
   padding-right: calc(14px + env(safe-area-inset-right, 0px));
-  padding-bottom: 14px;
+  padding-bottom: calc(14px + var(--banner-h));
   padding-left: calc(14px + env(safe-area-inset-left, 0px));
   -webkit-overflow-scrolling: touch;
 }
@@ -284,13 +295,20 @@ body {
    */
   min-height: 64px;
   /*
-   * Strong outline + slightly-tinted background. The previous
-   * 1px #e0e6ee on white-on-white was effectively invisible on a
-   * phone (the user reported a blank-looking room screen despite
-   * 100 tiles being in the DOM). 2px solid #98a4b4 reads clearly
-   * against either the white scene background or the locked-cell
-   * grey, and the subtle inset gradient gives the tile a paper-card
-   * feel rather than a flat white square.
+   * Flex layout for the inner labels (number + progress) so they
+   * never overlap regardless of cell size. .room-fill stays
+   * absolutely positioned BEHIND them (flex layout ignores it).
+   */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 4px;
+  /*
+   * Strong outline + slightly-tinted background so each tile reads
+   * clearly against the white scene. 2px #98a4b4 + subtle gradient
+   * + small drop shadow gives a paper-card feel.
    */
   border: 2px solid #98a4b4;
   border-radius: 12px;
@@ -299,7 +317,6 @@ body {
   color: var(--scene-ink);
   cursor: pointer;
   overflow: hidden;
-  padding: 0;
   font: inherit;
   /*
    * Disable the default browser focus ring on touch and rely on
@@ -320,11 +337,12 @@ body {
 }
 
 .room-cell.is-locked {
-  /* Locked cells override the gradient with a flat tone so the
-     unlocked-vs-locked distinction reads at a glance. */
-  background: var(--scene-locked-bg);
-  border-color: #bdc7d4;
-  color: var(--scene-locked-ink);
+  /* Locked cells: flat grey background, dimmer text, no shadow.
+     The lock/unlock distinction is the colour contrast alone
+     (no padlock glyph). */
+  background: #d8dee6;
+  border-color: #b0bac8;
+  color: #8a96a6;
   cursor: not-allowed;
   box-shadow: none;
 }
@@ -347,46 +365,33 @@ body {
 
 .room-number {
   position: relative;
-  display: block;
   text-align: center;
-  margin-top: 18%;
-  font-size: clamp(22px, 7vw, 36px);
+  font-size: clamp(22px, 7vw, 34px);
   font-weight: 800;
   color: inherit;
+  line-height: 1;
+  /* z-index above the room-fill overlay (which is absolute). */
+  z-index: 1;
   /* Ensure the number reads on top of the room-fill gradient
      overlay below it. */
   text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 .room-progress {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 8px;
+  position: relative;
   text-align: center;
   font-size: 10px;
   letter-spacing: 1px;
   color: inherit;
   opacity: 0.75;
+  line-height: 1;
+  z-index: 1;
 }
 
 .room-cell.is-locked .room-progress {
-  display: none;
-}
-
-.room-lock {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  opacity: 0.6;
-  pointer-events: none;
-}
-
-.room-cell.is-locked .room-number {
-  opacity: 0.35;
+  /* Hide the 0/3 count on locked rooms — the dimmed grey already
+     conveys "not available" and there's no completion to display. */
+  visibility: hidden;
 }
 
 /* --- Room-interior + paint scene shared chrome --- */

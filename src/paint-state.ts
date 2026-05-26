@@ -125,8 +125,22 @@ export class PaintState {
     this.colorFilled[colorIdx]++;
     return {
       changed: true,
-      completed: this.filledCount >= this.paintableCount,
+      completed: this.isComplete(),
     };
+  }
+
+  /**
+   * Single source of truth for "is this puzzle done?". Requires BOTH:
+   *   - at least one paintable cell (paintableCount > 0)
+   *   - every paintable cell filled
+   *
+   * The paintableCount > 0 guard catches the trivial-completion bug:
+   * a puzzle whose cells array is empty or all-background (-1) has
+   * paintableCount == 0, and `filledCount >= 0` would otherwise fire
+   * the completion modal on entry before any painting happens.
+   */
+  isComplete(): boolean {
+    return this.paintableCount > 0 && this.filledCount >= this.paintableCount;
   }
 
   /** Convenience: snapshot for UI binding. */
@@ -134,7 +148,7 @@ export class PaintState {
     return {
       filledCount: this.filledCount,
       paintableCount: this.paintableCount,
-      complete: this.filledCount >= this.paintableCount,
+      complete: this.isComplete(),
       colorFilled: this.colorFilled,
       colorTotal: this.colorTotal,
     };

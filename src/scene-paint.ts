@@ -135,6 +135,27 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         await state.load();
         if (cancelled) return;
 
+        const snap = state.snapshot();
+        // Diagnostic — surfaces malformed puzzles (paintableCount=0
+        // would have triggered an instant "Complete!" before the
+        // guard in paint-state.isComplete() landed). Logs the raw
+        // file-reported paintableCells too so we can tell whether
+        // the malformation came from the JSON or from the loader.
+        // eslint-disable-next-line no-console
+        console.info(
+          `[Mozai] picture ${puzzle.id}: ${puzzle.w}×${puzzle.h}, ` +
+            `palette=${puzzle.palette.length}, ` +
+            `paintableCells(json)=${puzzle.paintableCells}, ` +
+            `paintableCount(computed)=${snap.paintableCount}, ` +
+            `filledCount=${snap.filledCount}, complete=${snap.complete}`,
+        );
+        if (snap.paintableCount === 0) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[Mozai] picture ${puzzle.id} has paintableCount=0 — treating as malformed, NOT complete.`,
+          );
+        }
+
         renderer = new PaintRenderer(canvas, state);
         // First fit pass — canvas already has its CSS size because the
         // .paint-viewport flex box sized it in the previous frame.
