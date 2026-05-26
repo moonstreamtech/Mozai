@@ -131,6 +131,69 @@ async function boot(): Promise<void> {
     if (tiles === 0) {
       bootLog('WARNING rooms scene mounted with 0 tiles');
     }
+
+    // Post-mount layout probe. Reads computed sizes / rects of the
+    // key containers AFTER the next frame so layout has settled — if
+    // the room grid is visually blank despite tiles=100, this tells
+    // us whether the failure is:
+    //   • collapsed parent height (#game.h ≈ 0)
+    //   • collapsed scene (overflow / inset miscompute)
+    //   • zero-sized tiles (aspect-ratio not honored on this WebView)
+    //   • or none of the above (i.e. visibility / colour issue)
+    // Reads are coalesced into one rAF so a single forced reflow
+    // covers all of them.
+    requestAnimationFrame(() => {
+      try {
+        const gameRect = gameEl.getBoundingClientRect();
+        const sceneEl = document.querySelector('.scene') as HTMLElement | null;
+        const gridEl = document.querySelector('.rooms-grid') as HTMLElement | null;
+        const tileEl = document.querySelector('.room-cell') as HTMLElement | null;
+        const bannerVar = getComputedStyle(document.documentElement)
+          .getPropertyValue('--banner-h')
+          .trim();
+        const gameCS = getComputedStyle(gameEl);
+        bootLog(
+          `#game rect: x=${gameRect.x.toFixed(0)} y=${gameRect.y.toFixed(0)} ` +
+            `w=${gameRect.width.toFixed(0)} h=${gameRect.height.toFixed(0)} ` +
+            `cssH=${gameCS.height} ovf=${gameCS.overflow}`,
+        );
+        bootLog(`--banner-h resolved=${bannerVar || '(empty)'}`);
+        if (sceneEl) {
+          const sr = sceneEl.getBoundingClientRect();
+          const scs = getComputedStyle(sceneEl);
+          bootLog(
+            `.scene rect: x=${sr.x.toFixed(0)} y=${sr.y.toFixed(0)} ` +
+              `w=${sr.width.toFixed(0)} h=${sr.height.toFixed(0)} ` +
+              `padT=${scs.paddingTop} ovfY=${scs.overflowY}`,
+          );
+        } else {
+          bootLog('.scene element NOT FOUND in DOM');
+        }
+        if (gridEl) {
+          const gr = gridEl.getBoundingClientRect();
+          bootLog(
+            `.rooms-grid rect: x=${gr.x.toFixed(0)} y=${gr.y.toFixed(0)} ` +
+              `w=${gr.width.toFixed(0)} h=${gr.height.toFixed(0)}`,
+          );
+        } else {
+          bootLog('.rooms-grid element NOT FOUND in DOM');
+        }
+        if (tileEl) {
+          const tr = tileEl.getBoundingClientRect();
+          const tcs = getComputedStyle(tileEl);
+          bootLog(
+            `.room-cell[0] rect: x=${tr.x.toFixed(0)} y=${tr.y.toFixed(0)} ` +
+              `w=${tr.width.toFixed(0)} h=${tr.height.toFixed(0)} ` +
+              `bg=${tcs.backgroundColor} border=${tcs.borderColor} ` +
+              `aspectRatio=${tcs.aspectRatio || '(unset)'}`,
+          );
+        } else {
+          bootLog('.room-cell[0] NOT FOUND in DOM');
+        }
+      } catch (err) {
+        reportError('layout probe threw', err);
+      }
+    });
   } catch (err) {
     reportError('Scene manager / rooms-scene mount failed', err);
     renderFatalPanel(gameEl, 'rooms-scene mount', err);

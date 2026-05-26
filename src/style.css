@@ -186,11 +186,12 @@ body {
    * NOTE on safe-area: #game already has `padding-top:
    * env(safe-area-inset-top)`, but because we use `inset: 0` here
    * the scene fills #game's PADDING BOX — i.e. it ends up positioned
-   * inside #game's padding-top, not below it. That's why on a phone
-   * with a status bar the room-select header was clipping under the
-   * status bar. We compensate by also applying the top safe-area
-   * inset here. The horizontal insets follow the same pattern so a
-   * landscape notch is respected.
+   * inside #game's padding-top, not below it. We compensate by also
+   * applying the top safe-area inset here, plus --boot-strip-h so
+   * the scene clears the always-on-top boot diagnostics strip.
+   * --boot-strip-h is set by error-overlay.ts to the strip's actual
+   * pixel height and removed when the strip isn't mounted, so this
+   * collapses cleanly back to safe-area-top when boot debug is off.
    */
   position: absolute;
   inset: 0;
@@ -198,7 +199,7 @@ body {
   color: var(--scene-ink);
   overflow-y: auto;
   overflow-x: hidden;
-  padding-top: calc(14px + env(safe-area-inset-top, 0px));
+  padding-top: calc(14px + env(safe-area-inset-top, 0px) + var(--boot-strip-h, 0px));
   padding-right: calc(14px + env(safe-area-inset-right, 0px));
   padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   padding-left: calc(14px + env(safe-area-inset-left, 0px));
@@ -248,9 +249,26 @@ body {
 .room-cell {
   position: relative;
   aspect-ratio: 1 / 1;
-  border: 1px solid var(--scene-border);
+  /*
+   * min-height is a safety net for older WebView builds where
+   * `aspect-ratio` on a `1fr` grid item can compute to zero height.
+   * 64px keeps every tile clearly tappable and visible even if the
+   * aspect-ratio rule is silently ignored.
+   */
+  min-height: 64px;
+  /*
+   * Strong outline + slightly-tinted background. The previous
+   * 1px #e0e6ee on white-on-white was effectively invisible on a
+   * phone (the user reported a blank-looking room screen despite
+   * 100 tiles being in the DOM). 2px solid #98a4b4 reads clearly
+   * against either the white scene background or the locked-cell
+   * grey, and the subtle inset gradient gives the tile a paper-card
+   * feel rather than a flat white square.
+   */
+  border: 2px solid #98a4b4;
   border-radius: 12px;
-  background: var(--scene-bg);
+  background: linear-gradient(180deg, #ffffff 0%, #f1f4f9 100%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   color: var(--scene-ink);
   cursor: pointer;
   overflow: hidden;
@@ -275,9 +293,13 @@ body {
 }
 
 .room-cell.is-locked {
+  /* Locked cells override the gradient with a flat tone so the
+     unlocked-vs-locked distinction reads at a glance. */
   background: var(--scene-locked-bg);
+  border-color: #bdc7d4;
   color: var(--scene-locked-ink);
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 .room-fill {
@@ -301,9 +323,12 @@ body {
   display: block;
   text-align: center;
   margin-top: 18%;
-  font-size: clamp(20px, 6vw, 32px);
+  font-size: clamp(22px, 7vw, 36px);
   font-weight: 800;
   color: inherit;
+  /* Ensure the number reads on top of the room-fill gradient
+     overlay below it. */
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.6);
 }
 
 .room-progress {
@@ -583,9 +608,10 @@ body {
   padding: 8px 12px;
   border-bottom: 1px solid var(--scene-border);
   background: var(--scene-bg);
-  /* The whole scene already sits inside #game which excludes
-     --banner-h, but the top safe-area inset is consumed here. */
-  padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  /* Top safe-area + (temporary) boot-strip clearance. --boot-strip-h
+     collapses to 0 when the strip isn't mounted, so this is a no-op
+     in production once VITE_BOOT_DEBUG is turned off. */
+  padding-top: calc(8px + env(safe-area-inset-top, 0px) + var(--boot-strip-h, 0px));
   padding-left: calc(12px + env(safe-area-inset-left, 0px));
   padding-right: calc(12px + env(safe-area-inset-right, 0px));
 }

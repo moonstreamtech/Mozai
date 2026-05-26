@@ -158,6 +158,7 @@ function ensureBootStrip(): HTMLDivElement | null {
     pre.textContent = stripBuffer.join('\n');
     el.scrollTop = el.scrollHeight;
   }
+  scheduleStripHeightUpdate();
   return el;
 }
 
@@ -166,7 +167,30 @@ function appendStrip(text: string): void {
   if (stripLogEl) {
     stripLogEl.textContent = stripBuffer.join('\n');
     if (stripEl) stripEl.scrollTop = stripEl.scrollHeight;
+    // Schedule a measurement so the scene's padding-top can clear
+    // the strip. requestAnimationFrame here means layout has settled
+    // before we read offsetHeight, and we only do one read per
+    // bootLog call so the cost is negligible.
+    scheduleStripHeightUpdate();
   }
+}
+
+let stripHeightRaf = 0;
+function scheduleStripHeightUpdate(): void {
+  if (stripHeightRaf !== 0) return;
+  stripHeightRaf = requestAnimationFrame(() => {
+    stripHeightRaf = 0;
+    if (!stripEl) {
+      document.documentElement.style.removeProperty('--boot-strip-h');
+      return;
+    }
+    // Cap at the strip's max-height (40vh) so a runaway log doesn't
+    // push the scene further down than the user can see. offsetHeight
+    // already respects max-height (the strip scrolls internally past
+    // that point), so this is just defensive.
+    const h = stripEl.offsetHeight;
+    document.documentElement.style.setProperty('--boot-strip-h', `${h}px`);
+  });
 }
 
 /**
