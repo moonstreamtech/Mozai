@@ -39,15 +39,20 @@ export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const cached = bundleCache.get(roomN);
   if (cached) return cached;
   const url = `content/room${roomN}/thumbs.json`;
-  const p = fetch(url, { cache: 'no-store' }).then(async (res) => {
-    if (!res.ok) {
-      // Fail loudly enough that the room-interior scene can show an
-      // error state instead of an indefinite loading spinner.
-      throw new Error(`${url} fetch failed: ${res.status}`);
-    }
-    const data = (await res.json()) as ThumbBundle;
-    return data;
-  });
+  // Error messages include the attempted URL so the room-interior
+  // scene's error tile can show the developer exactly what the
+  // WebView tried to fetch.
+  const p = fetch(url, { cache: 'no-store' })
+    .catch((err) => {
+      throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
+    })
+    .then(async (res) => {
+      if (!res.ok) {
+        throw new Error(`fetch('${url}') status ${res.status}`);
+      }
+      const data = (await res.json()) as ThumbBundle;
+      return data;
+    });
   // Cache the promise (not the resolved value) so concurrent loaders
   // don't race. A rejected promise stays in the cache so retries
   // happen via an explicit cache eviction (none for now — fetch errors

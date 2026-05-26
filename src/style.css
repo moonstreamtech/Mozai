@@ -182,6 +182,15 @@ body {
    * container fully so scroll behaviour and white background work as
    * expected. Without `position: absolute` the flex centering would
    * shrink them to their content.
+   *
+   * NOTE on safe-area: #game already has `padding-top:
+   * env(safe-area-inset-top)`, but because we use `inset: 0` here
+   * the scene fills #game's PADDING BOX — i.e. it ends up positioned
+   * inside #game's padding-top, not below it. That's why on a phone
+   * with a status bar the room-select header was clipping under the
+   * status bar. We compensate by also applying the top safe-area
+   * inset here. The horizontal insets follow the same pattern so a
+   * landscape notch is respected.
    */
   position: absolute;
   inset: 0;
@@ -189,13 +198,10 @@ body {
   color: var(--scene-ink);
   overflow-y: auto;
   overflow-x: hidden;
-  /*
-   * Bottom safe-area pad so the last row of room cells sits clear of
-   * anything that might paint into the bottom inset. The banner has
-   * its own reserved band on :root so we do NOT pad for it here —
-   * #game already excludes --banner-h.
-   */
-  padding: 14px 14px calc(14px + env(safe-area-inset-bottom, 0px));
+  padding-top: calc(14px + env(safe-area-inset-top, 0px));
+  padding-right: calc(14px + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  padding-left: calc(14px + env(safe-area-inset-left, 0px));
   -webkit-overflow-scrolling: touch;
 }
 

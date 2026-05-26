@@ -45,19 +45,35 @@ export interface Puzzle {
  * Fetch the content index. Resolves base-relative so the same call
  * works in `npm run dev`, in `vite preview`, and inside the
  * Capacitor WebView (where the page lives at e.g.
- * `http://localhost/index.html`).
+ * `https://localhost/index.html`).
+ *
+ * Error messages include the attempted URL so the on-screen fatal
+ * panel can show the developer exactly what the WebView tried to
+ * fetch — "content/index.json fetch failed: 404" is far more
+ * useful than a bare TypeError on device.
  */
 export async function loadContentIndex(): Promise<ContentIndex> {
-  const res = await fetch('content/index.json', { cache: 'no-store' });
-  if (!res.ok) {
-    throw new Error(`content/index.json fetch failed: ${res.status}`);
+  const url = 'content/index.json';
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: 'no-store' });
+  } catch (err) {
+    throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
   }
-  const data = (await res.json()) as ContentIndex;
+  if (!res.ok) {
+    throw new Error(`fetch('${url}') status ${res.status}`);
+  }
+  let data: ContentIndex;
+  try {
+    data = (await res.json()) as ContentIndex;
+  } catch (err) {
+    throw new Error(`fetch('${url}') parse failed — ${(err as Error)?.message ?? err}`);
+  }
   // Defensive: an empty / malformed index is a content pipeline bug.
-  // We surface it loudly here rather than silently rendering an empty
+  // Surface it loudly here rather than silently rendering an empty
   // room grid that looks like "the user has no progress".
   if (!data || typeof data.maxRoom !== 'number' || !data.rooms) {
-    throw new Error('content/index.json is malformed');
+    throw new Error(`fetch('${url}') returned malformed payload`);
   }
   return data;
 }
@@ -74,9 +90,14 @@ export async function loadPuzzle(meta: PuzzleMeta): Promise<Puzzle> {
   const cached = puzzleCache.get(meta.id);
   if (cached) return cached;
   const url = `content/room${meta.room}/${meta.id}.json`;
-  const res = await fetch(url, { cache: 'no-store' });
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: 'no-store' });
+  } catch (err) {
+    throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
+  }
   if (!res.ok) {
-    throw new Error(`${url} fetch failed: ${res.status}`);
+    throw new Error(`fetch('${url}') status ${res.status}`);
   }
   const puzzle = (await res.json()) as Puzzle;
   puzzleCache.set(meta.id, puzzle);

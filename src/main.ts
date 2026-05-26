@@ -3,6 +3,9 @@
  *
  * Boot order matters:
  *
+ *   0. Install the error overlay BEFORE anything else so a thrown
+ *      exception during import resolution becomes a visible message
+ *      instead of a silent white screen on device.
  *   1. Resolve required DOM elements; bail with a clear error if the
  *      HTML and TS are out of sync.
  *   2. Mount the resize controller against #game (so the play area is
@@ -30,6 +33,12 @@ import { roomsSceneMount } from './scene-rooms.js';
 import { makeRoomSceneMount } from './scene-room.js';
 import { makePaintSceneMount } from './scene-paint.js';
 import { setRewardedConfig } from './rewarded.js';
+import { bootLog, installErrorOverlay, reportError } from './error-overlay.js';
+
+// Install global error capture as the very first runtime side-effect.
+// Any synchronous throw between here and boot()'s catch will land on
+// the on-screen overlay.
+installErrorOverlay();
 
 function requireEl<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -38,22 +47,16 @@ function requireEl<T extends HTMLElement>(id: string): T {
 }
 
 async function boot(): Promise<void> {
+  bootLog('boot() start');
+
   const gameEl = requireEl<HTMLDivElement>('game');
   const canvasEl = requireEl<HTMLCanvasElement>('play-canvas');
   const bannerEl = requireEl<HTMLDivElement>('banner');
   const debugEl = requireEl<HTMLDivElement>('debug');
+  bootLog('DOM hooks ok (#game, #play-canvas, #banner, #debug)');
 
   const debug = isDebugReadoutEnabled() ? mountDebugReadout(debugEl) : null;
 
-  // The play-canvas is the future home of the colour-by-number
-  // renderer. Until the paint engine lands the canvas sits hidden
-  // beneath the scene DOM — but we still keep the resize controller
-  // attached so:
-  //   a) the canvas backing store is kept in sync for the paint scene
-  //   b) the debug readout has a continuous stream of FitInfo
-  //   c) the foundation contract (resize gates) stays exercised
-  // We hide the canvas to avoid the placeholder grid leaking through
-  // when no scene paints over it (mount order is async).
   canvasEl.style.visibility = 'hidden';
   const controller = attachResize({
     game: gameEl,
@@ -61,6 +64,7 @@ async function boot(): Promise<void> {
     render: makePlaceholderGrid(),
     onFit: (info) => debug?.update(info),
   });
+  bootLog('resize controller attached');
 
   if (debug) {
     window.addEventListener('mozai:banner-height-changed', (e: Event) => {
@@ -72,53 +76,55 @@ async function boot(): Promise<void> {
   }
 
   const adConfig = readAdMobConfig();
-  // eslint-disable-next-line no-console
-  console.info(
-    `[Mozai] Boot. AdMob mode: ${adConfig.mode} (test ids ${adConfig.mode === 'TEST' ? 'IN USE' : 'NOT USED'})`,
-  );
+  bootLog(`config ok — AdMob mode: ${adConfig.mode}`);
 
   initBanner({ config: adConfig, bannerEl }).catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('[Mozai] initBanner threw', err);
+    reportError('initBanner threw', err);
   });
 
-  // The rewarded module is stateless across the app lifetime — caching
-  // the config once at boot keeps every paint scene's hint button from
-  // re-reading env. Cleared in nothing for now; tests can re-call with
-  // a null to wipe.
   setRewardedConfig(adConfig);
 
   // Content index + progress are independent and both small — load in
   // parallel so the first scene paint happens as soon as both settle.
-  const [index] = await Promise.all([loadContentIndex(), loadProgress()]);
-  // eslint-disable-next-line no-console
-  console.info(`[Mozai] Content index: ${index.maxRoom} room(s).`);
+  // Either failure mode (network, malformed JSON, missing key) is
+  // surfaced via reportError + an inline panel below.
+  bootLog('index fetch: content/index.json');
+  let index;
+  try {
+    const [loadedIndex] = await Promise.all([loadContentIndex(), loadProgress()]);
+    index = loadedIndex;
+    bootLog(`index loaded: maxRoom=${index.maxRoom} rooms=[${Object.keys(index.rooms).join(',')}]`);
+  } catch (err) {
+    reportError('Failed to load content/index.json or progress', err);
+    renderFatalPanel(gameEl, 'content/index.json', err);
+    return;
+  }
 
-  // Scene manager owns the #game subtree from here on.
-  const scenes = new SceneManager({
-    host: gameEl,
-    index,
-    registry: {
-      rooms: roomsSceneMount,
-      room: makeRoomSceneMount,
-      paint: makePaintSceneMount,
-    },
-  });
-  scenes.start();
+  let scenes: SceneManager;
+  try {
+    scenes = new SceneManager({
+      host: gameEl,
+      index,
+      registry: {
+        rooms: roomsSceneMount,
+        room: makeRoomSceneMount,
+        paint: makePaintSceneMount,
+      },
+    });
+    scenes.start();
+    bootLog('rooms scene mounted');
+  } catch (err) {
+    reportError('Scene manager / rooms-scene mount failed', err);
+    renderFatalPanel(gameEl, 'rooms-scene mount', err);
+    return;
+  }
 
   // Hardware back button (Android gesture / button). Wired through the
   // Capacitor App plugin; falls back to no-op on web where there is
-  // no native back button to intercept. We CANNOT cleanly preventDefault
-  // a hardware back at the WebView level on web, so this only matters
-  // on native.
+  // no native back button to intercept.
   await wireHardwareBack(scenes);
 
-  // Debug helpers — only mounted when MOZAI_DEBUG is on. Lets a
-  // developer mark pictures complete from the JS console to verify
-  // the % fill + lock progression without playing through the stub,
-  // and to jump straight into a high-room puzzle (e.g. the 1000x1000
-  // performance test) without satisfying every lock between here and
-  // there.
+  // Debug helpers — only mounted when MOZAI_DEBUG is on.
   if (isDebugReadoutEnabled()) {
     interface MozaiDebug {
       markCompleted: (id: string) => Promise<void>;
@@ -151,18 +157,49 @@ async function boot(): Promise<void> {
   }
 }
 
+/**
+ * In-place fatal-error panel rendered into #game. Visible regardless
+ * of whether the error overlay's <body>-level pile is being read — a
+ * device user gets a clear "what failed and what URL was attempted"
+ * panel instead of a blank screen.
+ */
+function renderFatalPanel(host: HTMLElement, attempted: string, err: unknown): void {
+  const message = (err as Error)?.message ?? String(err);
+  const stack = (err as Error)?.stack ?? '';
+  host.replaceChildren();
+  const panel = document.createElement('div');
+  panel.style.cssText = [
+    'position:absolute',
+    'inset:0',
+    'padding:calc(12px + env(safe-area-inset-top,0px)) 14px calc(12px + env(safe-area-inset-bottom,0px))',
+    'overflow:auto',
+    'background:#1f0a0a',
+    'color:#ffd1d1',
+    'font:13px/1.4 system-ui, sans-serif',
+  ].join(';');
+  panel.innerHTML = `
+    <h2 style="margin:0 0 8px;font-size:16px;color:#ff8a8a;">Mozai failed to boot</h2>
+    <p style="margin:0 0 6px;color:#cf9090;">Attempted: <code>${escapeHtml(attempted)}</code></p>
+    <p style="margin:0 0 8px;font-weight:700">${escapeHtml(message)}</p>
+    <pre style="margin:0;white-space:pre-wrap;word-break:break-word;font:11px/1.35 ui-monospace,Menlo,monospace;color:#ffb4b4">${escapeHtml(stack)}</pre>
+  `;
+  host.appendChild(panel);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 async function wireHardwareBack(scenes: SceneManager): Promise<void> {
   try {
     const { App } = await import(/* @vite-ignore */ '@capacitor/app');
-    // Plugin emits 'backButton' with `canGoBack` reflecting the
-    // WebView history. We ignore canGoBack and consult OUR scene
-    // stack: scenes drive the entire UX, the WebView never navigates.
     App.addListener('backButton', () => {
       if (scenes.canBack()) {
         scenes.back();
       } else {
-        // At the root scene — let the OS dismiss the app (mirrors
-        // Android conventions where back at the root closes the app).
         App.exitApp();
       }
     });
@@ -174,15 +211,13 @@ async function wireHardwareBack(scenes: SceneManager): Promise<void> {
 }
 
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
-    boot().catch((err) => {
-      // eslint-disable-next-line no-console
-      console.error('[Mozai] Boot failed', err);
-    });
-  }, { once: true });
+  document.addEventListener(
+    'DOMContentLoaded',
+    () => {
+      boot().catch((err) => reportError('boot() rejected', err));
+    },
+    { once: true },
+  );
 } else {
-  boot().catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error('[Mozai] Boot failed', err);
-  });
+  boot().catch((err) => reportError('boot() rejected', err));
 }
