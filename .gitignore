@@ -43,9 +43,11 @@ android/*.iml
 android/app/*.iml
 
 # Keystores: never commit. Release keystore is materialised at CI build time
-# from a base64 secret (RELEASE_KEYSTORE_BASE64) mirroring Last Tile's flow.
+# from a base64 secret (MOZAI_KEYSTORE_BASE64 → android/app/mozai-release.keystore)
+# mirroring Last Tile's flow.
 *.keystore
 *.jks
+android/app/mozai-release.keystore
 release.keystore
 
 # iOS — not in scope for v1 but exclude generated build artefacts pre-emptively

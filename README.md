@@ -196,6 +196,65 @@ build if found (post-build content scan).
 
 ---
 
+## Release pipeline
+
+`.github/workflows/release.yml` builds a signed AAB + APK on every push
+to `main` and on manual `workflow_dispatch`. Artifacts only — no Play
+Store upload (the publish step is left as a clearly-commented stub in
+the workflow).
+
+### Required GitHub Actions secrets
+
+| Secret | Used by | Notes |
+| --- | --- | --- |
+| `MOZAI_ADMOB_APP_ID` | manifest placeholder + Vite env | Required for real ads |
+| `MOZAI_ADMOB_BANNER_UNIT_ID` | `showBanner({adId})` | Required for real ads |
+| `MOZAI_KEYSTORE_BASE64` | decoded to `android/app/mozai-release.keystore` at CI time | Required for a Play-uploadable build |
+| `MOZAI_KEYSTORE_PASSWORD` | `signingConfigs.release.storePassword` | Required for release signing |
+| `MOZAI_KEY_ALIAS` | `signingConfigs.release.keyAlias` | Required for release signing |
+| `MOZAI_KEY_PASSWORD` | `signingConfigs.release.keyPassword` | Required for release signing |
+| `MOZAI_PLAY_SERVICE_ACCOUNT_JSON` | future Play upload step (stub only) | Not used today |
+
+If any of the four signing secrets is missing the Gradle script falls
+back to **debug signing** so local + CI builds still succeed — but Play
+would reject a debug-signed AAB, which is the intentional guard. The
+startup line `[Mozai] Release signing: PRODUCTION (...)` vs
+`DEBUG fallback (...)` makes the active mode visible in the build log.
+
+### Creating the upload keystore (one-time, do this locally)
+
+```sh
+# 1. Generate the upload keystore. Pick a strong store password and
+#    key password (they can be the same for a single-alias keystore).
+keytool -genkeypair -v \
+  -keystore mozai-release.keystore \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias mozai-upload
+
+# 2. Base64-encode it for the GitHub Secret. Pipe DIRECTLY to clipboard
+#    — never commit the .b64 file.
+#    macOS:
+base64 -i mozai-release.keystore | pbcopy
+#    Linux:
+base64 -w 0 mozai-release.keystore | xclip -selection clipboard
+
+# 3. In GitHub repo → Settings → Secrets and variables → Actions, add:
+#      MOZAI_KEYSTORE_BASE64      paste the base64 string
+#      MOZAI_KEYSTORE_PASSWORD    the store password
+#      MOZAI_KEY_ALIAS            mozai-upload
+#      MOZAI_KEY_PASSWORD         the key password
+
+# 4. Store mozai-release.keystore offline (1Password / Bitwarden /
+#    encrypted USB). Losing it means we can't publish updates to the
+#    same app on Play — recovery requires a Play Console support case.
+```
+
+The decoded `android/app/mozai-release.keystore` is gitignored so a
+fat-fingered `git add .` cannot leak it. CI materialises it from the
+secret at job time and the runner is reclaimed afterwards.
+
+---
+
 ## Acceptance criteria
 
 The foundation PR is considered complete when **all** of:

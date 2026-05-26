@@ -17,6 +17,26 @@ def resolvedAdmobAppId = envAdmobAppId ?: ADMOB_TEST_APP_ID
 def admobMode = envAdmobAppId ? "PRODUCTION" : "TEST"
 println("[Mozai] AdMob mode: ${admobMode} (real ids never logged)")
 
+// Release signing.
+//
+// All values come from GitHub Secrets — nothing is hardcoded and the
+// keystore file itself is gitignored. The .github/workflows/release.yml
+// workflow decodes MOZAI_KEYSTORE_BASE64 into the path below before
+// invoking Gradle.
+//
+// Local dev fallback: when MOZAI_KEYSTORE_BASE64 (or the materialised
+// keystore file) is absent we attach the debug signing config to the
+// release variant so `./gradlew assembleRelease` still succeeds on a
+// laptop without any secrets configured. This produces a debug-signed
+// release APK — installable on dev devices but rejected by Play.
+def envKeystorePassword = System.getenv("MOZAI_KEYSTORE_PASSWORD") ?: ""
+def envKeyAlias = System.getenv("MOZAI_KEY_ALIAS") ?: ""
+def envKeyPassword = System.getenv("MOZAI_KEY_PASSWORD") ?: ""
+def releaseKeystoreFile = file("mozai-release.keystore")
+def releaseSigningAvailable = releaseKeystoreFile.exists() &&
+    envKeystorePassword && envKeyAlias && envKeyPassword
+println("[Mozai] Release signing: ${releaseSigningAvailable ? 'PRODUCTION (release keystore)' : 'DEBUG fallback (no MOZAI_KEYSTORE_* env / no keystore file)'}")
+
 android {
     namespace "com.moonstreamtech.mozai"
     compileSdk rootProject.ext.compileSdkVersion
@@ -24,8 +44,11 @@ android {
         applicationId "com.moonstreamtech.mozai"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
+        // TODO: auto-increment versionCode from the CI run number once
+        // we have a release cadence. Hardcoded to 1 for the foundation
+        // PR so local + CI builds produce reproducible artifacts.
         versionCode 1
-        versionName "0.1.0"
+        versionName "0.0.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         // The AndroidManifest's `${admobAppId}` placeholder reads this
         // value. Substituting at the Gradle level (not in the manifest
@@ -38,10 +61,41 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        // RELEASE upload key. Only registered when the materialised
+        // keystore + the three env vars are ALL present — otherwise the
+        // release build falls back to debug signing below. Reading the
+        // env values inline (rather than caching at evaluation time)
+        // means a typo'd env var produces a clearer Gradle error than
+        // a silent "tried to sign with empty password" failure.
+        if (releaseSigningAvailable) {
+            release {
+                storeFile releaseKeystoreFile
+                storePassword envKeystorePassword
+                keyAlias envKeyAlias
+                keyPassword envKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
+            // Capacitor's WebView shim and several community plugins
+            // rely on runtime reflection; minify on without a tuned
+            // ProGuard config strips them. Keep minify off here — we
+            // can revisit once the colour-by-number engine lands and
+            // we have a clear "what reflects what" picture.
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // Attach the release signing config when available;
+            // otherwise the build falls back to the debug signing
+            // config so local `./gradlew assembleRelease` still
+            // produces an installable (dev-only) artifact. Play would
+            // reject a debug-signed AAB, which is the desired guard.
+            if (releaseSigningAvailable) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
         }
     }
 }
