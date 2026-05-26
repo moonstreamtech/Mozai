@@ -31,6 +31,7 @@
 import type { SceneContext, SceneMount } from './scenes.js';
 import { isRoomUnlocked } from './content.js';
 import { completedCountForRoom } from './progress.js';
+import { bootLog } from './error-overlay.js';
 
 const COLUMNS = 5;
 
@@ -58,6 +59,16 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
   const maxRoom = ctx.index.maxRoom;
   for (let n = 1; n <= maxRoom; n++) {
     grid.appendChild(buildRoomCell(n, ctx));
+  }
+  // Explicit boot-strip telemetry so a "0 rooms" failure mode is
+  // visibly distinguishable from "scene didn't mount at all". The
+  // tile count is read off the live DOM so it confirms the appended
+  // children actually landed.
+  bootLog(
+    `scene-rooms render: maxRoom=${maxRoom} tilesAppended=${grid.children.length}`,
+  );
+  if (maxRoom === 0 || grid.children.length === 0) {
+    bootLog('WARNING rooms=0 — scene-rooms produced an empty grid');
   }
 
   if (maxRoom === 0) {

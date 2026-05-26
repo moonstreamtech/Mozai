@@ -23,5 +23,9 @@ export default defineConfig({
     host: true,
     port: 5173,
   },
-  envPrefix: 'MOZAI_',
+  // Accept both prefixes: MOZAI_ for product config (ad ids, debug
+  // readout) and VITE_ for ephemeral / build-flag style toggles like
+  // VITE_BOOT_DEBUG that we don't want to bake into the long-term
+  // MOZAI_ namespace.
+  envPrefix: ['MOZAI_', 'VITE_'],
 });

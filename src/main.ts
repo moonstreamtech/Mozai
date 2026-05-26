@@ -26,7 +26,7 @@ import { makePlaceholderGrid } from './placeholder-grid.js';
 import { initBanner } from './banner.js';
 import { isDebugReadoutEnabled, readAdMobConfig } from './env.js';
 import { mountDebugReadout } from './debug-readout.js';
-import { loadContentIndex } from './content.js';
+import { loadContentIndex, type ContentIndex } from './content.js';
 import { load as loadProgress, debugMarkCompleted, debugReset } from './progress.js';
 import { SceneManager } from './scenes.js';
 import { roomsSceneMount } from './scene-rooms.js';
@@ -47,7 +47,8 @@ function requireEl<T extends HTMLElement>(id: string): T {
 }
 
 async function boot(): Promise<void> {
-  bootLog('boot() start');
+  bootLog(`boot() start — href=${location.href}`);
+  bootLog(`ua=${navigator.userAgent}`);
 
   const gameEl = requireEl<HTMLDivElement>('game');
   const canvasEl = requireEl<HTMLCanvasElement>('play-canvas');
@@ -76,7 +77,7 @@ async function boot(): Promise<void> {
   }
 
   const adConfig = readAdMobConfig();
-  bootLog(`config ok — AdMob mode: ${adConfig.mode}`);
+  bootLog(`config: admob=${adConfig.mode} base=${import.meta.env.BASE_URL ?? '(unset)'}`);
 
   initBanner({ config: adConfig, bannerEl }).catch((err) => {
     reportError('initBanner threw', err);
@@ -87,16 +88,26 @@ async function boot(): Promise<void> {
   // Content index + progress are independent and both small — load in
   // parallel so the first scene paint happens as soon as both settle.
   // Either failure mode (network, malformed JSON, missing key) is
-  // surfaced via reportError + an inline panel below.
-  bootLog('index fetch: content/index.json');
-  let index;
+  // surfaced via reportError + an inline panel below. The fetch URL,
+  // status, and parsed shape are all logged via the boot strip so a
+  // "loaded 0 rooms" failure (no throw, just empty) is also visible.
+  const indexUrlAbsolute = new URL('content/index.json', location.href).href;
+  bootLog(`fetch index: ${indexUrlAbsolute}`);
+  let index: ContentIndex;
   try {
     const [loadedIndex] = await Promise.all([loadContentIndex(), loadProgress()]);
     index = loadedIndex;
-    bootLog(`index loaded: maxRoom=${index.maxRoom} rooms=[${Object.keys(index.rooms).join(',')}]`);
+    const roomKeys = Object.keys(index.rooms);
+    const roomCounts = roomKeys.map((k) => `${k}:${index.rooms[k]?.length ?? 0}`).join(' ');
+    bootLog(
+      `index json: maxRoom=${index.maxRoom} roomKeys=[${roomKeys.join(',')}] roomCounts=[${roomCounts}]`,
+    );
+    if (index.maxRoom === 0 || roomKeys.length === 0) {
+      bootLog('WARNING rooms=0 — content/index.json parsed but EMPTY');
+    }
   } catch (err) {
     reportError('Failed to load content/index.json or progress', err);
-    renderFatalPanel(gameEl, 'content/index.json', err);
+    renderFatalPanel(gameEl, indexUrlAbsolute, err);
     return;
   }
 
@@ -112,7 +123,14 @@ async function boot(): Promise<void> {
       },
     });
     scenes.start();
-    bootLog('rooms scene mounted');
+    const sceneCount = document.querySelectorAll('.scene').length;
+    const tiles = document.querySelectorAll('.scene-rooms .room-cell').length;
+    bootLog(
+      `rooms scene mounted, tiles=${tiles} (.scene count=${sceneCount}, href=${location.href})`,
+    );
+    if (tiles === 0) {
+      bootLog('WARNING rooms scene mounted with 0 tiles');
+    }
   } catch (err) {
     reportError('Scene manager / rooms-scene mount failed', err);
     renderFatalPanel(gameEl, 'rooms-scene mount', err);

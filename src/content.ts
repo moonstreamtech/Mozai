@@ -13,6 +13,8 @@
  * there is no network round-trip.
  */
 
+import { bootLog } from './error-overlay.js';
+
 export interface PuzzleMeta {
   id: string;
   room: number;
@@ -60,6 +62,7 @@ export async function loadContentIndex(): Promise<ContentIndex> {
   } catch (err) {
     throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
   }
+  bootLog(`index status: ${res.status} (url=${res.url})`);
   if (!res.ok) {
     throw new Error(`fetch('${url}') status ${res.status}`);
   }
