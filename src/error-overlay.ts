@@ -29,10 +29,10 @@
  * designed to expose.
  */
 
-// Flip to false to hide the debug button in a release. Will be
-// removed before launch; until then it's the on-device escape hatch
-// when the boot strip is off.
-const SHOW_DEBUG_BUTTON = true;
+// Flip to true to surface the 🐞 button + overlay popup. OFF in
+// production — flip on temporarily for an on-device debug session,
+// re-build, install, then flip back before release.
+const SHOW_DEBUG_BUTTON = false;
 
 const Z_ERROR = 9999;
 const Z_BOOT_STRIP = 9990;
@@ -62,6 +62,21 @@ function isBootDebugEnabled(): boolean {
   if (v === undefined || v === '') return false;
   return v !== '0' && v !== 'false';
 }
+
+/**
+ * Single switch that governs whether the diagnostic pipeline is
+ * active. When false, bootLog / diagLog early-return — no console
+ * noise, no diagnostic buffer growth, no overlay updates. The
+ * red-panel error overlay (reportError) is INDEPENDENT and stays
+ * armed regardless: a thrown exception still surfaces.
+ *
+ * Set from the two build-time flags only:
+ *   SHOW_DEBUG_BUTTON   (constant above)
+ *   VITE_BOOT_DEBUG     (env at build time)
+ * Computed once at module load so each log call is a single boolean
+ * check, not a re-read of env / DOM.
+ */
+const DIAGNOSTICS_ENABLED = SHOW_DEBUG_BUTTON || isBootDebugEnabled();
 
 function timestamp(): string {
   return ((Date.now() - bootStart) / 1000).toFixed(2).padStart(6, ' ') + 's';
@@ -384,6 +399,7 @@ async function copyToClipboard(text: string): Promise<boolean> {
  * enabled.
  */
 export function bootLog(msg: string): void {
+  if (!DIAGNOSTICS_ENABLED) return;
   const t = timestamp();
   const line = `${t}  ${msg}`;
   diagBuffer.push(line);
@@ -402,6 +418,7 @@ export function bootLog(msg: string): void {
  * and the popup; does NOT touch the error overlay buffer.
  */
 export function diagLog(msg: string): void {
+  if (!DIAGNOSTICS_ENABLED) return;
   const t = timestamp();
   const line = `${t}  ${msg}`;
   diagBuffer.push(line);

@@ -44,6 +44,33 @@ export const ADMOB_TEST_BANNER_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/6300978
 export const ADMOB_TEST_REWARDED_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/5224354917`;
 
 /**
+ * AdMob test-device IDs. Devices in this list receive TEST creatives
+ * even in production builds that use real ad unit IDs — the AdMob
+ * SDK's intended developer workflow for "I want to install the
+ * production APK on my own phone without risking real-ad clicks
+ * against my own account."
+ *
+ * How to add your device:
+ *   1. Install the APK once with this array empty.
+ *   2. Run `adb logcat -s Ads` and look for a line like
+ *        Use AdRequest.Builder.addTestDevice("33BE2250B43518CC...")
+ *        to get test ads on this device.
+ *      The hex string is your device's test ID.
+ *   3. Append it to TEST_DEVICE_IDS below, rebuild, reinstall.
+ *
+ * Account-level test devices configured in the AdMob console
+ * (Settings → Test devices) are an alternative — those don't need
+ * a code change, but require dashboard access. The TEST_DEVICE_IDS
+ * array is the repository-tracked equivalent.
+ *
+ * NOTE: not secrets — IDs identify a device, not an account.
+ */
+export const TEST_DEVICE_IDS: string[] = [
+  // Add device IDs here (one per developer device that should
+  // always serve test creatives in release builds).
+];
+
+/**
  * Live CDN base for puzzle content that isn't bundled with the APK
  * (rooms 2+). The folder layout mirrors the app's local
  * `public/content/` 1:1, so any path under `roomN/...` on the CDN

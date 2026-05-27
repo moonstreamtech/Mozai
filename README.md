@@ -174,18 +174,45 @@ in the boot still surfaces them in the error panel.
 
 ### Pre-release flag checklist
 
-A handful of source constants and env vars are wired ON during
-development. They MUST be flipped before publishing a release:
+All four toggles below are at their production values on `main`.
+Re-confirm before tagging a release if anyone has been debugging
+locally:
 
-| Constant / env var | File / source | Production value |
-| --- | --- | --- |
-| `SHOW_DEBUG_BUTTON` | `src/error-overlay.ts` | `false` (hides the 🐞 button) |
-| `UNLOCK_ALL_ROOMS` | `src/scene-rooms.ts` | `false` (re-arms the lock chain) |
-| `VITE_BOOT_DEBUG` | env at build time | unset (boot strip stays off) |
-| `MOZAI_ADMOB_TESTING` | env at build time | unset for production (CI's `release.yml` already omits it; `build.yml` sets `'1'` because PR APKs shouldn't serve real ads) |
+| Constant / env var | File / source | Production value | Notes |
+| --- | --- | --- | --- |
+| `SHOW_DEBUG_BUTTON` | `src/error-overlay.ts` | `false` ✓ | Hides the 🐞 button + popup. Also silences `bootLog` / `diagLog` (early-return in `DIAGNOSTICS_ENABLED` gate) so production builds have no diagnostic console noise. `reportError` (red panel) stays armed regardless. |
+| `UNLOCK_ALL_ROOMS` | `src/scene-rooms.ts` | `false` ✓ | Real lock chain active — room K (K ≥ 2) unlocked iff `completedCountForRoom(K-1) >= K`. |
+| `VITE_BOOT_DEBUG` | env at build time | unset ✓ | Boot diagnostics strip off. |
+| `MOZAI_ADMOB_TESTING` | env at build time | unset for production ✓ | `release.yml` omits it (real ads serve). `build.yml` sets `'1'` so PR debug APKs always test — keep that. |
 
-A pre-release script could grep for the relevant identifiers and
-fail if any are still on; for now we rely on this checklist.
+### Adding a test device for real-ads builds
+
+Production builds use real ad-unit IDs from the moment of install.
+To install a release build on a developer phone without risking
+real-ad clicks against the AdMob account, register the device's
+test ID either in code or in the AdMob console:
+
+**Option A — code (repo-tracked):**
+1. Install the build once with `TEST_DEVICE_IDS` empty.
+2. `adb logcat -s Ads` and look for:
+   ```
+   Use AdRequest.Builder.addTestDevice("33BE2250B43518CC...") to
+   get test ads on this device.
+   ```
+3. Append the hex string to `TEST_DEVICE_IDS` in `src/env.ts`,
+   rebuild, reinstall. The device now sees test creatives even
+   with real ad unit IDs configured.
+
+**Option B — AdMob console (account-level):**
+1. AdMob → Settings → Test devices → Add device.
+2. Provide the device's AAID (Settings → Google → Ads on most
+   Android builds) or use the same hex ID from logcat as above.
+3. No code change required; persists across all apps under the
+   same publisher account.
+
+Both options are policy-compliant. **Never** click your own real
+ads on a device that isn't registered — it triggers AdMob's invalid
+traffic detection and can lead to account suspension.
 
 ---
 

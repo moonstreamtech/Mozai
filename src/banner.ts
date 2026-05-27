@@ -32,7 +32,7 @@
  * Capacitor AdMob plugin's `bannerSize` event is the bridge.
  */
 
-import type { AdMobConfig } from './env.js';
+import { TEST_DEVICE_IDS, type AdMobConfig } from './env.js';
 
 // --- Plugin loading ---
 //
@@ -156,15 +156,25 @@ export async function initBanner(opts: InitBannerOpts): Promise<BannerHandle> {
     return { mode: config.mode, runtime: 'web' };
   }
 
-  // Initialise SDK. `initializeForTesting` ensures every device
-  // behaves as a test device so we never accidentally bill a real
-  // impression during development. It's true when EITHER (a) we're
-  // falling back to test placement ids (mode === 'TEST') OR (b) the
-  // explicit MOZAI_ADMOB_TESTING flag is set on a real-ids build
-  // (developer running QA on their personal phone). When both are
-  // off — i.e. a real production build — initializeForTesting is
-  // omitted so live ads are served normally.
-  await plugin.initialize(config.isTesting ? { initializeForTesting: true } : {});
+  // Initialise SDK.
+  //   testingDevices: TEST_DEVICE_IDS — devices whose AAID-derived
+  //     test ID appears here see TEST creatives even in production
+  //     (real ad unit IDs). The AdMob SDK's intended workflow for
+  //     "I install my own APK on my phone but don't want to click
+  //     my own real ads". See src/env.ts for how to obtain the ID.
+  //   initializeForTesting: forces every device to test mode.
+  //     Only set when:
+  //       (a) config.mode === 'TEST' (no real placement IDs
+  //           configured; the fallback Google test IDs are in use)
+  //     OR
+  //       (b) MOZAI_ADMOB_TESTING build env is set ('1' / 'true')
+  //     On a real production build with both off, this flag is
+  //     omitted so live ads serve normally — only the
+  //     testingDevices list filters out registered dev devices.
+  const initOpts: { testingDevices?: string[]; initializeForTesting?: boolean } = {};
+  if (TEST_DEVICE_IDS.length > 0) initOpts.testingDevices = TEST_DEVICE_IDS;
+  if (config.isTesting) initOpts.initializeForTesting = true;
+  await plugin.initialize(initOpts);
 
   // Subscribe BEFORE showBanner so we never miss the first size event.
   // The plugin emits the event with the rendered height in CSS pixels
