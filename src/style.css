@@ -614,6 +614,28 @@ body {
   color: #8a3a3a;
 }
 
+/*
+ * Small, unobtrusive "downloading … N/M" indicator that scene-room
+ * appends while it prefetches the room's puzzle JSONs in the
+ * background after the silhouette grid renders. Dimmer than
+ * .scene-note so it doesn't compete with the grid for attention.
+ * Hidden via .prefetch-status-done (fade + remove) when the queue
+ * drains.
+ */
+.prefetch-status {
+  text-align: center;
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--scene-muted);
+  opacity: 0.6;
+  margin: 8px auto 0;
+  letter-spacing: 1px;
+  transition: opacity 400ms ease-out;
+  pointer-events: none;
+}
+.prefetch-status-done {
+  opacity: 0;
+}
+
 .cta-btn {
   display: block;
   margin: 12px auto;

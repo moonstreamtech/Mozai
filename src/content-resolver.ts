@@ -44,6 +44,15 @@ export interface ResolveResult {
   source: ContentSource;
 }
 
+// Retry knobs for the network path. Per-attempt timeout fires via
+// AbortController (Chrome 66+, supported on the target Chrome 92
+// WebView). Three attempts with 500/1000/2000ms backoff between
+// them — total worst case is 3*8s + 500 + 1000 = ~25.5s, which is
+// long but bounded.
+const MAX_ATTEMPTS = 3;
+const PER_ATTEMPT_TIMEOUT_MS = 8000;
+const BACKOFF_BASE_MS = 500;
+
 /**
  * Is this content path served from the bundled app assets?
  *   - `content/index.json`               (boot index)
@@ -109,19 +118,16 @@ export async function resolveContent(path: string): Promise<ResolveResult> {
     return { text: cached, source: 'cache' };
   }
 
-  // Network from CDN.
+  // Network from CDN with retry + timeout. A flaky connection
+  // (intermittent "Failed to fetch" between successful requests)
+  // would previously fall through to offline on the first failure;
+  // we now retry transient errors (network throws, 5xx) up to
+  // MAX_ATTEMPTS times. A definitive 4xx (e.g. 404) is NOT retried —
+  // that content genuinely isn't there.
   const cdnUrl = joinUrl(CDN_BASE, cacheKey);
-  try {
-    diagLog(`content fetch: ${cdnUrl}`);
-    const res = await fetch(cdnUrl, { cache: 'no-store' });
-    diagLog(`content status: ${res.status} for ${cdnUrl}`);
-    if (!res.ok) {
-      diagLog(
-        `content offline: ${path} no cache, network status ${res.status}`,
-      );
-      return { text: '', source: 'FAILED' };
-    }
-    const text = await res.text();
+  const fetchOutcome = await fetchWithRetry(cdnUrl);
+  if (fetchOutcome.kind === 'ok') {
+    const text = fetchOutcome.text;
     // Fire-and-forget cache write. The user has the content already;
     // a write failure (disk full, permission) shouldn't fail the
     // resolve. Log so future debug sessions can tell.
@@ -134,10 +140,63 @@ export async function resolveContent(path: string): Promise<ResolveResult> {
       `content resolve ${path}: source=network ok=true ms=${Date.now() - start}`,
     );
     return { text, source: 'network' };
-  } catch (err) {
-    diagLog(
-      `content offline: ${path} no cache, no network (${(err as Error)?.message ?? err})`,
-    );
-    return { text: '', source: 'FAILED' };
   }
+  diagLog(
+    `content offline: ${path} no cache, no network (${fetchOutcome.reason})`,
+  );
+  return { text: '', source: 'FAILED' };
+}
+
+type FetchOutcome =
+  | { kind: 'ok'; text: string }
+  | { kind: 'failed'; reason: string };
+
+/**
+ * Fetch with per-attempt timeout + small retry loop for transient
+ * failures (network throws, 5xx). Definitive 4xx responses are
+ * returned to the caller without retry — content genuinely isn't
+ * there. The caller (resolveContent) treats any non-ok response
+ * as a FAILED resolve.
+ */
+async function fetchWithRetry(url: string): Promise<FetchOutcome> {
+  let lastReason = 'unknown';
+  for (let k = 1; k <= MAX_ATTEMPTS; k++) {
+    diagLog(`content fetch attempt ${k}/${MAX_ATTEMPTS}: ${url}`);
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
+      clearTimeout(timeoutId);
+      diagLog(`content status: ${res.status} for ${url}`);
+      if (res.ok) {
+        const text = await res.text();
+        return { kind: 'ok', text };
+      }
+      // 4xx (except 408 request-timeout, 429 too-many-requests) is
+      // definitive — return without further retry. The caller will
+      // surface this as offline / FAILED.
+      const transient = res.status >= 500 || res.status === 408 || res.status === 429;
+      if (!transient) {
+        return { kind: 'failed', reason: `status ${res.status}` };
+      }
+      lastReason = `status ${res.status}`;
+    } catch (err) {
+      clearTimeout(timeoutId);
+      // AbortError, "Failed to fetch", and other network errors all
+      // land here. Treat them all as transient — they're exactly
+      // the case the retry loop exists for.
+      lastReason = (err as Error)?.message ?? String(err);
+      diagLog(`content fetch attempt ${k}/${MAX_ATTEMPTS} threw: ${lastReason}`);
+    }
+    if (k < MAX_ATTEMPTS) {
+      const wait = BACKOFF_BASE_MS * (1 << (k - 1)); // 500, 1000, 2000
+      diagLog(`content retry: waiting ${wait}ms before attempt ${k + 1}`);
+      await sleep(wait);
+    }
+  }
+  return { kind: 'failed', reason: `${lastReason} after ${MAX_ATTEMPTS} attempts` };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

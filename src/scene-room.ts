@@ -37,6 +37,8 @@ import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle, type ThumbMode } from './thumbs.js';
 import { ContentResolveError } from './content.js';
+import { prefetchPuzzles } from './content-prefetch.js';
+import { diagLog } from './error-overlay.js';
 import { t } from './i18n.js';
 
 // Generous over-scan so a fast flick still finds the next tile painted.
@@ -86,6 +88,11 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
       .then((bundle) => {
         if (cancelled) return;
         intersectionObserver = renderGrid(body, pictures, bundle, ctx);
+        // Background prefetch — kick off downloading every puzzle in
+        // this room into the cache so taps are instant and the room
+        // works offline after this first visit. Runs concurrently
+        // with the user browsing; doesn't block the silhouette grid.
+        startRoomPrefetch(body, target.roomN, pictures, () => cancelled);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -239,4 +246,57 @@ function renderTileCanvas(tile: HTMLElement): void {
   canvas.width = w;
   canvas.height = h;
   renderThumb(canvas, payload.thumb, payload.mode);
+}
+
+/**
+ * Kick off background prefetch of every puzzle JSON in the room.
+ * Appends a small `↓ N/M` indicator to the scene body that updates
+ * as each puzzle resolves and hides itself when the queue drains.
+ * Diag at the end:
+ *   prefetch room<N>: <count> puzzles, ok=<n> failed=<n>
+ */
+function startRoomPrefetch(
+  body: HTMLElement,
+  roomN: number,
+  pictures: PuzzleMeta[],
+  isCancelled: () => boolean,
+): void {
+  if (pictures.length === 0) return;
+  const total = pictures.length;
+  const status = document.createElement('div');
+  status.className = 'prefetch-status';
+  status.setAttribute('aria-live', 'polite');
+  status.innerHTML = `↓ <span data-count>0/${total}</span>`;
+  body.appendChild(status);
+  const countEl = status.querySelector<HTMLSpanElement>('[data-count]');
+
+  let settled = 0;
+  prefetchPuzzles(pictures, {
+    concurrency: 2,
+    isCancelled,
+    onItem: () => {
+      settled++;
+      if (countEl) countEl.textContent = `${settled}/${total}`;
+    },
+  })
+    .then((result) => {
+      diagLog(
+        `prefetch room${roomN}: ${total} puzzles, ok=${result.ok} failed=${result.failed}`,
+      );
+      // Brief pause so the final "N/N" lands on screen, then fade
+      // the indicator out. If the scene tore down in the meantime
+      // the node is gone and we no-op.
+      if (status.isConnected) {
+        status.classList.add('prefetch-status-done');
+        setTimeout(() => {
+          if (status.isConnected) status.remove();
+        }, 600);
+      }
+    })
+    .catch((err) => {
+      diagLog(
+        `prefetch room${roomN}: threw ${(err as Error)?.message ?? err}`,
+      );
+      if (status.isConnected) status.remove();
+    });
 }
