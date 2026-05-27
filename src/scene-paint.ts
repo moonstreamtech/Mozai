@@ -382,8 +382,12 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           // (selectedColor stays -1; no swatch to pre-select on a
           // fully done picture.)
         } else {
-          const first = firstAvailableColor();
-          if (first >= 0) selectColor(first);
+          // No auto-selection: the user picks a palette swatch
+          // themselves. selectedColor stays at -1 until they tap.
+          // The Hint button stays disabled until then; canvas
+          // taps don't paint until then. The intent is that
+          // colour selection is always a deliberate user choice,
+          // never silently imposed by the engine.
         }
       })
       .catch((err) => {
@@ -418,16 +422,6 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         el.classList.toggle('is-selected', swatchIdx === idx);
       });
       updateHintBtn();
-    }
-
-    function firstAvailableColor(): number {
-      if (!state) return -1;
-      for (let i = 0; i < state.colorTotal.length; i++) {
-        if (state.colorTotal[i] > 0 && state.colorFilled[i] < state.colorTotal[i]) {
-          return i;
-        }
-      }
-      return -1;
     }
 
     function renderPalette(): void {
@@ -503,12 +497,12 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       const swatch = paletteEl.querySelector<HTMLElement>(`.swatch[data-idx="${idx}"]`);
       if (!swatch) return;
       swatch.classList.add('is-done');
-      // Auto-advance selection to another not-yet-done colour so the
-      // player can keep painting without an extra tap.
+      // No auto-advance: when the just-completed colour was the
+      // selected one, clear selection back to none. The player picks
+      // the next colour themselves on their next tap. Matches the
+      // "selection is always deliberate" rule applied at scene mount.
       if (selectedColor === idx) {
-        const next = firstAvailableColor();
-        if (next >= 0) selectColor(next);
-        else selectedColor = -1;
+        selectColor(-1);
       }
       window.setTimeout(() => {
         // Re-check inside the timer in case the scene tore down or

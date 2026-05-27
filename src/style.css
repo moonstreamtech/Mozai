@@ -866,15 +866,30 @@ body {
   gap: 4px;
   padding: 4px;
   background: transparent;
-  border: 2px solid transparent;
+  /*
+   * 3 px border: invisible when not selected (transparent), strong
+   * dark ring when selected. Bumped from 2 to 3 so the selected
+   * state is clearly distinguishable from the un-selected swatches
+   * around it — the player picks colours deliberately now (no auto
+   * selection on entry or after a colour finishes), so the
+   * "which swatch is active?" signal needs to read at a glance.
+   */
+  border: 3px solid transparent;
   border-radius: 10px;
   font: inherit;
   cursor: pointer;
-  transition: opacity 250ms ease-out;
+  transition: opacity 250ms ease-out, transform 80ms ease-out;
 }
 
 .swatch.is-selected {
   border-color: var(--scene-ink);
+  /* Subtle lift to reinforce the "active" affordance. */
+  transform: translateY(-2px);
+}
+
+/* Tap feedback on a fresh selection. */
+.swatch:not(.is-selected):active {
+  transform: scale(0.96);
 }
 
 .swatch.is-done {
