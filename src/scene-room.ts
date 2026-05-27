@@ -36,6 +36,7 @@ import type { RoomTarget, SceneContext, SceneMount } from './scenes.js';
 import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle, type ThumbMode } from './thumbs.js';
+import { t } from './i18n.js';
 
 // Generous over-scan so a fast flick still finds the next tile painted.
 // 400 px ahead/behind the viewport is ~4 grid rows on a typical phone.
@@ -71,7 +72,7 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
 
     // Loading placeholder. Replaced by the grid once thumbs.json
     // resolves; replaced by an error state if the fetch fails.
-    body.innerHTML = '<p class="scene-note">Loading pictures…</p>';
+    body.innerHTML = `<p class="scene-note">${t('loadingPictures')}</p>`;
 
     const pictures = ctx.index.rooms[String(target.roomN)] ?? [];
 
@@ -91,8 +92,8 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         console.error('[Mozai] thumbs load failed', err);
         body.innerHTML = `
           <p class="scene-note scene-error">
-            Could not load room ${target.roomN} thumbnails.<br>
-            <button class="cta-btn" type="button" data-retry>Retry</button>
+            ${t('couldNotLoadThumbs', { n: target.roomN })}<br>
+            <button class="cta-btn" type="button" data-retry>${t('retry')}</button>
           </p>`;
         body.querySelector<HTMLButtonElement>('[data-retry]')?.addEventListener('click', () => {
           // Re-mount the scene by routing forward to the same target.
@@ -120,7 +121,7 @@ function renderGrid(
   if (pictures.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'scene-note';
-    empty.textContent = 'No pictures in this room yet.';
+    empty.textContent = t('noPicturesYet');
     host.appendChild(empty);
     return null;
   }

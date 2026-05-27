@@ -38,9 +38,31 @@ import { PaintRenderer, type CameraLimits } from './paint-render.js';
 import { PaintInput } from './paint-input.js';
 import { showRewarded } from './rewarded.js';
 import { diagLog } from './error-overlay.js';
+import type { PuzzleMeta } from './content.js';
 import { t } from './i18n.js';
 
 const SAVE_DEBOUNCE_MS = 400;
+/**
+ * Guard window after the completion modal becomes visible. The
+ * pointer-up of the painting drag that COMPLETED the puzzle can
+ * arrive on top of the Done button and auto-dismiss the modal
+ * before the user has even seen it. We reject any click during this
+ * window AND require the click's pointerdown to have started on
+ * the Done button itself (see makePaintSceneMount).
+ */
+const COMPLETE_DISMISS_GUARD_MS = 500;
+
+/**
+ * "Room N · seq" title used in the topbar and in the completion
+ * card. Parses the picture id's `rN-...` form to extract the seq
+ * suffix; `meta.room` already provides the room number from the
+ * JSON. The "Room" word is localized via i18n.
+ */
+function pictureTitle(meta: PuzzleMeta): string {
+  const dash = meta.id.indexOf('-');
+  const seq = dash >= 0 ? meta.id.slice(dash + 1) : meta.id;
+  return `${t('room')} ${meta.room} · ${seq}`;
+}
 
 export function makePaintSceneMount(target: PaintTarget): SceneMount {
   return (host, ctx) => {
@@ -55,10 +77,10 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           </svg>
         </button>
         <div class="paint-title-block">
-          <span class="paint-title">${meta.id}</span>
+          <span class="paint-title">${pictureTitle(meta)}</span>
           <span class="paint-progress-label" data-overall-pct>0%</span>
         </div>
-        <button class="hint-btn" type="button" data-hint disabled>💡 Hint</button>
+        <button class="hint-btn" type="button" data-hint disabled>💡 ${t('hint')}</button>
       </header>
       <div class="paint-viewport">
         <canvas class="paint-canvas"></canvas>
@@ -66,13 +88,13 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           <button class="zoom-btn" type="button" data-zoom-out aria-label="Zoom out">−</button>
           <button class="zoom-btn" type="button" data-zoom-in aria-label="Zoom in">+</button>
         </div>
-        <div class="paint-loading" data-loading>Loading puzzle…</div>
+        <div class="paint-loading" data-loading>${t('loadingPuzzle')}</div>
       </div>
       <div class="paint-palette" role="toolbar" aria-label="Colour palette"></div>
       <div class="paint-completion" data-completion hidden>
         <div class="paint-completion-card">
-          <h2>Complete!</h2>
-          <p>You finished <strong>${meta.id}</strong>.</p>
+          <h2>${t('completeTitle')}</h2>
+          <p>${t('completeFinished', { name: `<strong>${pictureTitle(meta)}</strong>` })}</p>
           <button class="cta-btn" type="button" data-dismiss-complete>${t('done')}</button>
         </div>
       </div>
@@ -109,13 +131,47 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
 
     const onBack = () => doBack(ctx);
     back.addEventListener('click', onBack);
+
     // "Done" / "Tamam" button: DISMISS the modal and stay on the
     // finished picture so the user can keep viewing their artwork.
     // Navigation back to the room is done via the back arrow /
     // hardware back, not by auto-navigation here.
+    //
+    // Anti-drag-tap guard: the pointer-up of the painting drag
+    // that COMPLETED the puzzle can land on top of the Done button
+    // (the modal becomes visible mid-stroke). The browser then
+    // synthesises a click on the button, auto-dismissing the modal
+    // before the user sees it. Two gates:
+    //   1. modalShownAt + COMPLETE_DISMISS_GUARD_MS — reject any
+    //      click for ~500 ms after the modal opens, regardless of
+    //      provenance.
+    //   2. donePointerArmed — true only after a `pointerdown`
+    //      START on the Done button itself. A drag that begins on
+    //      the canvas keeps the pointer captured by the canvas, so
+    //      the button never sees its own pointerdown — donePointerArmed
+    //      stays false and the synthesised click is rejected. A
+    //      deliberate, fresh tap on Done arms the button (new
+    //      pointerdown → click → dismiss).
+    let modalShownAt = 0;
+    let donePointerArmed = false;
+    const onDonePointerDown = () => {
+      donePointerArmed = true;
+    };
     const onDismissComplete = () => {
+      const elapsed = Date.now() - modalShownAt;
+      if (elapsed < COMPLETE_DISMISS_GUARD_MS) {
+        diagLog(`done: click rejected (within ${COMPLETE_DISMISS_GUARD_MS}ms guard, elapsed=${elapsed}ms)`);
+        donePointerArmed = false;
+        return;
+      }
+      if (!donePointerArmed) {
+        diagLog('done: click rejected (no pointerdown on button — tail of paint drag)');
+        return;
+      }
+      donePointerArmed = false;
       completionEl.hidden = true;
     };
+    completionDismissBtn.addEventListener('pointerdown', onDonePointerDown);
     completionDismissBtn.addEventListener('click', onDismissComplete);
 
     const onHint = () => {
@@ -126,7 +182,11 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       // they originally asked for.
       const colorForHint = selectedColor;
       hintBtn.disabled = true;
-      hintBtn.textContent = '💡 Loading…';
+      // Locale-neutral wait indicator on the hint button (the ad is
+      // preparing, not the puzzle). One ellipsis instead of a
+      // translated word keeps the button width stable across
+      // languages.
+      hintBtn.textContent = '💡 …';
       showRewarded()
         .then((granted) => {
           if (cancelled || !state || !renderer) return;
@@ -330,7 +390,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] loadPuzzle failed', err);
-        loadingEl.textContent = `Could not load puzzle ${meta.id}.`;
+        loadingEl.textContent = t('couldNotLoadPuzzle', { id: pictureTitle(meta) });
         loadingEl.classList.add('scene-error');
       });
 
@@ -400,23 +460,23 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       // the user opening an already-finished puzzle sees a clear
       // completion indicator in the topbar without the modal
       // covering the canvas.
-      overallPctEl.textContent = s.complete ? '✓ Done' : `${pct}%`;
+      overallPctEl.textContent = s.complete ? t('doneBadge') : `${pct}%`;
     }
 
     function updateHintBtn(): void {
       if (!state) {
         hintBtn.disabled = true;
-        hintBtn.textContent = '💡 Hint';
+        hintBtn.textContent = `💡 ${t('hint')}`;
         return;
       }
       if (selectedColor < 0) {
         hintBtn.disabled = true;
-        hintBtn.textContent = '💡 Hint';
+        hintBtn.textContent = `💡 ${t('hint')}`;
         return;
       }
       const already = state.hintRevealed.has(selectedColor);
       hintBtn.disabled = already;
-      hintBtn.textContent = already ? '💡 Hinted' : '💡 Hint';
+      hintBtn.textContent = already ? `💡 ${t('hinted')}` : `💡 ${t('hint')}`;
     }
 
     /**
@@ -469,6 +529,8 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         return;
       }
       completionEl.hidden = false;
+      modalShownAt = Date.now();
+      donePointerArmed = false;
       // Persist progress (best-effort) before notifying the global
       // progress store. markCompleted writes to a different key so
       // both must succeed for the room-select grid to update.
@@ -499,6 +561,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       cancelled = true;
       back.removeEventListener('click', onBack);
       completionDismissBtn.removeEventListener('click', onDismissComplete);
+      completionDismissBtn.removeEventListener('pointerdown', onDonePointerDown);
       hintBtn.removeEventListener('click', onHint);
       zoomInBtn.removeEventListener('click', onZoomIn);
       zoomOutBtn.removeEventListener('click', onZoomOut);

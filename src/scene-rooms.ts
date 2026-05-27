@@ -32,6 +32,7 @@ import type { SceneContext, SceneMount } from './scenes.js';
 import { isRoomUnlocked } from './content.js';
 import { completedCountForRoom } from './progress.js';
 import { bootLog } from './error-overlay.js';
+import { t } from './i18n.js';
 
 const COLUMNS = 5;
 
@@ -44,7 +45,7 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
   root.innerHTML = `
     <header class="rooms-header">
       <h1 class="rooms-title">Mozai</h1>
-      <p class="rooms-subtitle">Choose a room</p>
+      <p class="rooms-subtitle">${t('chooseRoom')}</p>
     </header>
     <div class="rooms-grid" role="list"></div>
   `;
