@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <!--
+            AdMob Application ID. This is the publisher-specific App
+            ID from the AdMob console (the one with the `~` separator)
+            — distinct from the per-placement ad-unit IDs (the ones
+            with `/`). Required by the SDK at process start: a missing
+            or wrong value crashes the app the moment AdMob.initialize()
+            is called.
+
+            Hardcoded here (not env-injected) because the App ID is a
+            stable per-app identifier that never varies across builds.
+            The two per-placement ad-unit IDs (banner, rewarded) DO
+            come from env vars (MOZAI_ADMOB_BANNER_ID,
+            MOZAI_ADMOB_REWARDED_ID) so dev / staging / prod can each
+            use their own placements; see src/env.ts.
+        -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-6334019930414150~5161718562" />
+
+        <activity
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:name=".MainActivity"
+            android:label="@string/title_activity_main"
+            android:theme="@style/AppTheme.NoActionBarLaunch"
+            android:launchMode="singleTask"
+            android:exported="true">
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+        </activity>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths"></meta-data>
+        </provider>
+    </application>
+
+    <!-- Permissions -->
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        AD_ID is required by AdMob starting with the SDK version that
+        targets Android 13 (API 33). Without it the SDK can't read the
+        advertising identifier on Android 13+ devices and serves only
+        non-personalised ads (legal but lower eCPM). The permission is
+        auto-granted, no runtime prompt.
+    -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
+</manifest>

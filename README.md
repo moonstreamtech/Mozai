@@ -1,1 +1,371 @@
 # Mozai
+
+Pixel color-by-number mobile game (Moonstream Tech, ad-only revenue).
+
+- **App name:** Mozai
+- **Android package:** `com.moonstreamtech.mozai`
+- **Stack:** Capacitor 6 + Vite + TypeScript (vanilla — no UI framework)
+- **Monetisation:** Anchored adaptive AdMob banner pinned to the bottom
+
+This PR sets up the foundation only: project scaffold, the screen-resize
+architecture, and the bottom AdMob banner. No game logic (rooms, palette,
+coloring, hints) yet — those land in later PRs.
+
+---
+
+## Architectural decision: Capacitor instead of native Android
+
+The reference project [Last Tile](https://github.com/moonstreamtech/LastTile) is a
+**native Android** app (Kotlin + Jetpack Compose), not a Capacitor app. The
+Mozai brief mandates a Capacitor app, so we **ported the architectural
+pattern** rather than the code:
+
+| Concern | Last Tile (native) | Mozai (Capacitor / web) |
+| --- | --- | --- |
+| Play-area sizing | `BoxWithConstraints` + `graphicsLayer` scale | `#game` container + `ResizeObserver` |
+| Adaptive banner height | `AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize` | `@capacitor-community/admob` `bannerSize` event |
+| Reserving banner space | `Modifier.height(adSize.height.dp)` | `--banner-h` CSS variable on `:root` |
+| Safe area | `enableEdgeToEdge()` + `WindowInsets.safeDrawing` | `viewport-fit=cover` + `env(safe-area-inset-*)` |
+| Ad ids | `BuildConfig.ADMOB_*` from env, test-id fallback | `import.meta.env.MOZAI_ADMOB_*` from env, test-id fallback |
+| CI | GitHub Actions, secrets, 4-layer test-id guard | Same pattern, adapted to web build |
+
+The core lesson from Last Tile that drove every choice here: **the banner
+is a native view overlaid on the WebView, it does NOT push web content
+up, and its adaptive height is device-dependent**. So the play area must
+explicitly reserve the banner's measured height, not a hard-coded 50px.
+
+---
+
+## Resize architecture
+
+Three rules, enforced everywhere:
+
+1. **`#game` is the single source of truth** for the playable area's box.
+   The canvas inside it is sized by `ResizeObserver(#game)`, never from
+   `window.innerHeight` or any layout-viewport read. The grep gate in
+   the validation section enforces this.
+
+2. **`--banner-h` reserves real space.** `#game` uses
+   `height: calc(100dvh - var(--banner-h))`. The variable defaults to
+   `env(safe-area-inset-bottom)` so the play area never sits under the
+   gesture nav before AdMob loads; once AdMob reports a height,
+   `banner.ts` writes `measuredBannerPx + env(safe-area-inset-bottom)`.
+
+3. **Re-fit on every relevant event.** `resize.ts` listens on
+   `ResizeObserver(#game)`, `visualViewport` `resize`/`scroll`,
+   `orientationchange`, and the custom `mozai:banner-height-changed`
+   event. All events coalesce into one `requestAnimationFrame` pass.
+
+`devicePixelRatio` is applied to the canvas backing store (`canvas.width`
+/ `.height`) while the CSS box stays at the logical size, so rendering
+stays crisp on Hi-DPI screens.
+
+Read the inline comments in `src/resize.ts` and `src/banner.ts` for the
+full contract.
+
+---
+
+## Project layout
+
+```
+src/
+  main.ts               Entry — wires resize, banner, content, scenes
+  resize.ts             Resize controller (engine-agnostic)
+  banner.ts             AdMob banner module (height -> --banner-h)
+  rewarded.ts           AdMob rewarded video → showRewarded() (web confirm fallback)
+  placeholder-grid.ts   Canvas grid (paint scene placeholder)
+  debug-readout.ts      MOZAI_DEBUG=1 on-screen metrics
+  env.ts                Build-time AdMob config + test-id fallback
+  env.d.ts              Vite env var types
+  style.css             #game / #banner / --banner-h + scene chrome + paint scene
+  content.ts            Index loader + lazy puzzle loader + isRoomUnlocked
+  progress.ts           Preferences-backed completion store
+  thumbs.ts             Per-room thumbs loader + canvas renderer
+  scenes.ts             History stack + mount/teardown manager
+  scene-rooms.ts        5-col room grid with % fill + lock rule
+  scene-room.ts         Silhouette grid (IntersectionObserver-lazy)
+  scene-paint.ts        Real coloring engine (palette + hint + completion)
+  paint-state.ts        Typed-array solution + filled + RLE save (Preferences / Filesystem spill)
+  paint-render.ts       ImageData-backed virtualized renderer (drawImage scaling)
+  paint-input.ts        1-finger paint / 2-finger pan-zoom gesture machine
+index.html              Viewport meta + safe-area-aware DOM shell
+capacitor.config.ts     appId com.moonstreamtech.mozai
+scripts/
+  build-content-index.mjs  Prebuild — scans public/content -> index.json + per-room thumbs.json
+  gen-large-puzzle.mjs     One-shot perf-test puzzle generator (1000x1000 mandala → room100/)
+public/content/
+  room<N>/<id>.json     Per-puzzle JSONs (committed by content tooling)
+  room<N>/thumbs.json   Per-room thumbnail bundle (committed)
+  index.json            Generated (gitignored) at predev/prebuild
+android/                Generated by `npx cap add android` (committed)
+```
+
+### Content pipeline
+
+Puzzle JSONs live at `public/content/room<N>/<id>.json` with schema
+`{ id, room, difficulty, w, h, palette, cells, colorCounts, paintableCells }`.
+
+`scripts/build-content-index.mjs` runs automatically via `npm predev`
+and `npm prebuild`, producing two outputs:
+
+1. `public/content/index.json` — slim home-screen index (no `cells`,
+   no thumbnails). Loaded once at app boot.
+   ```json
+   {
+     "maxRoom": 3,
+     "rooms": {
+       "1": [ { "id": "r1-001", "room": 1, "w": 4, "h": 4, "colors": 3, "paintableCells": 12 } ]
+     }
+   }
+   ```
+
+2. `public/content/room<N>/thumbs.json` — per-room thumbnail bundle.
+   Each entry is the puzzle downscaled to longest-side ≤ 32 via
+   nearest-neighbour (aspect preserved, `-1` cells stay `-1`). Loaded
+   ONLY when room N is opened, used to paint the silhouettes /
+   full-colour previews in the room-interior grid.
+   ```json
+   { "r1-001": { "w": 4, "h": 4, "palette": ["#..."], "cells": [-1, 0, 0, ...] } }
+   ```
+
+Full puzzle JSONs (which carry the heavy `cells` array) are loaded
+lazily by `loadPuzzle()` only when a picture is opened for colouring.
+
+### Progress & unlock rule
+
+`src/progress.ts` keeps the completion map under the
+`@capacitor/preferences` key `mozai.progress`. The lock rule is
+encoded in `content.ts::isRoomUnlocked`:
+
+- Room 1 always open.
+- Room K (K ≥ 2) unlocked iff `completedCountForRoom(K-1) >= K`.
+
+Content sizing has to satisfy that chain (room K-1 needs at least K
+puzzles for room K to be reachable). The sample content ships room 1
+(3 puzzles), room 2 (3 puzzles), room 3 (1 puzzle) so rooms 2 and 3
+are both reachable.
+
+With `MOZAI_DEBUG=1` the JS console exposes
+`window.__mozaiDebug.markCompleted(id)` and `.resetProgress()` for
+verifying the % fill and lock progression without playing through.
+
+### On-screen boot diagnostics strip (temporary)
+
+`src/error-overlay.ts` ships an always-on-screen boot diagnostics
+strip that prints the boot sequence and post-mount layout probe
+(`#game` height, `--banner-h`, `.scene` rect, first-tile rect) on
+the device itself. It exists so a blank-screen failure can be
+debugged without `adb logcat`.
+
+It is **OFF by default**. To re-enable for a one-off device debug
+session, set the `VITE_BOOT_DEBUG` env var at build time:
+
+```sh
+VITE_BOOT_DEBUG=1 npm run build
+npx cap sync android
+```
+
+The red-panel error overlay (synchronous throw / unhandled rejection)
+stays armed regardless of this flag — only the always-visible strip
+is gated off.
+The `bootLog()` machinery itself is also unaffected: log lines still
+go to `console.info` and stay buffered, so a `reportError()` later
+in the boot still surfaces them in the error panel.
+
+### Pre-release flag checklist
+
+All four toggles below are at their production values on `main`.
+Re-confirm before tagging a release if anyone has been debugging
+locally:
+
+| Constant / env var | File / source | Production value | Notes |
+| --- | --- | --- | --- |
+| `SHOW_DEBUG_BUTTON` | `src/error-overlay.ts` | `false` ✓ | Hides the 🐞 button + popup. Also silences `bootLog` / `diagLog` (early-return in `DIAGNOSTICS_ENABLED` gate) so production builds have no diagnostic console noise. `reportError` (red panel) stays armed regardless. |
+| `UNLOCK_ALL_ROOMS` | `src/scene-rooms.ts` | `false` ✓ | Real lock chain active — room K (K ≥ 2) unlocked iff `completedCountForRoom(K-1) >= K`. |
+| `VITE_BOOT_DEBUG` | env at build time | unset ✓ | Boot diagnostics strip off. |
+| `MOZAI_ADMOB_TESTING` | env at build time | unset for production ✓ | `release.yml` omits it (real ads serve). `build.yml` sets `'1'` so PR debug APKs always test — keep that. |
+
+### Adding a test device for real-ads builds
+
+Production builds use real ad-unit IDs from the moment of install.
+To install a release build on a developer phone without risking
+real-ad clicks against the AdMob account, register the device's
+test ID either in code or in the AdMob console:
+
+**Option A — code (repo-tracked):**
+1. Install the build once with `TEST_DEVICE_IDS` empty.
+2. `adb logcat -s Ads` and look for:
+   ```
+   Use AdRequest.Builder.addTestDevice("33BE2250B43518CC...") to
+   get test ads on this device.
+   ```
+3. Append the hex string to `TEST_DEVICE_IDS` in `src/env.ts`,
+   rebuild, reinstall. The device now sees test creatives even
+   with real ad unit IDs configured.
+
+**Option B — AdMob console (account-level):**
+1. AdMob → Settings → Test devices → Add device.
+2. Provide the device's AAID (Settings → Google → Ads on most
+   Android builds) or use the same hex ID from logcat as above.
+3. No code change required; persists across all apps under the
+   same publisher account.
+
+Both options are policy-compliant. **Never** click your own real
+ads on a device that isn't registered — it triggers AdMob's invalid
+traffic detection and can lead to account suspension.
+
+---
+
+## Build, run, deploy
+
+### Prerequisites
+
+- Node 20+ (this repo's CI uses Node 20)
+- npm 10+
+- Android SDK + JDK 17 (only for native build / device run)
+
+### Local dev (web preview, no native)
+
+```sh
+npm install
+npm run dev        # http://localhost:5173 — banner shows the placeholder strip
+```
+
+### Native build (device run)
+
+```sh
+npm install
+npm run build              # tsc + vite build -> dist/
+npx cap sync android       # copies dist/ into android/app/src/main/assets/public
+npx cap run android        # build APK and run on connected device / emulator
+```
+
+### Verify the foundation
+
+```sh
+npm run build                       # must succeed
+npx cap sync android                # must succeed
+grep -rn "innerHeight" src          # must be empty (play-area sizing gate)
+```
+
+The acceptance criteria for this PR are listed in the PR description and
+also in the inline comments of `src/resize.ts`. The debug readout (set
+`MOZAI_DEBUG=1` in a local `.env`) prints the four metrics needed to
+verify rule 2 by eye: `vv.h`, `bannerH`, `#game.h`, `dpr`.
+
+---
+
+## AdMob configuration
+
+The AdMob **App ID** (the `ca-app-pub-...~...` value) is hardcoded in
+`android/app/src/main/AndroidManifest.xml` — it's a stable per-app
+identifier issued once by the AdMob console and doesn't vary across
+builds.
+
+The two per-placement **ad-unit IDs** (the `.../...` values) come from
+GitHub Secrets at CI time. Missing values fall back to
+[Google's official AdMob test ids](https://developers.google.com/admob/android/test-ads)
+for the matching placement (banner test id for banner, rewarded test
+id for rewarded — they are not interchangeable).
+
+| Secret | Read by | Notes |
+| --- | --- | --- |
+| `MOZAI_ADMOB_BANNER_ID` | `import.meta.env.MOZAI_ADMOB_BANNER_ID` → `AdMob.showBanner({ adId })` | Required for real ads on the banner |
+| `MOZAI_ADMOB_REWARDED_ID` | `import.meta.env.MOZAI_ADMOB_REWARDED_ID` → `AdMob.showRewardVideoAd({ adId })` for the Hint button | Required for real ads on hints |
+| `MOZAI_ADMOB_TESTING` (env, not secret) | Forces `isTesting: true` + `initializeForTesting` on every plugin call regardless of placement IDs | Set on developer / QA builds to avoid "tapping your own ads" account flags |
+
+The mode is logged on boot via the 🐞 popup:
+```
+admob: ids=REAL testing=true forceTesting=true banner=ca-app-pub-6334…7843722225 rewarded=ca-app-pub-6334…8145459184
+```
+`ids` reports whether real placement IDs are configured (`REAL`) or
+the Google test ids are being used (`TEST`). `testing` is the
+effective `isTesting` flag passed to the AdMob plugin — true whenever
+`forceTesting` is on OR `ids === 'TEST'`. The full unit IDs are
+masked (publisher prefix + last 10 chars).
+
+CI defaults:
+- `.github/workflows/build.yml` (PR debug APK) sets `MOZAI_ADMOB_TESTING='1'`
+  so any artifact pulled off a debug job serves test creatives.
+- `.github/workflows/release.yml` (push-to-main, release artifacts)
+  deliberately leaves `MOZAI_ADMOB_TESTING` unset so production
+  builds serve real ads.
+
+---
+
+## Release pipeline
+
+`.github/workflows/release.yml` builds a signed AAB + APK on every push
+to `main` and on manual `workflow_dispatch`. Artifacts only — no Play
+Store upload (the publish step is left as a clearly-commented stub in
+the workflow).
+
+### Required GitHub Actions secrets
+
+| Secret | Used by | Notes |
+| --- | --- | --- |
+| `MOZAI_ADMOB_BANNER_ID` | `showBanner({adId})` | Required for real banner ads (test id fallback when missing) |
+| `MOZAI_ADMOB_REWARDED_ID` | `showRewardVideoAd({adId})` for paint-scene hints | Required for real rewarded ads (test id fallback when missing) |
+| `MOZAI_KEYSTORE_BASE64` | decoded to `android/app/mozai-release.keystore` at CI time | Required for a Play-uploadable build |
+| `MOZAI_KEYSTORE_PASSWORD` | `signingConfigs.release.storePassword` | Required for release signing |
+| `MOZAI_KEY_ALIAS` | `signingConfigs.release.keyAlias` | Required for release signing |
+| `MOZAI_KEY_PASSWORD` | `signingConfigs.release.keyPassword` | Required for release signing |
+| `MOZAI_PLAY_SERVICE_ACCOUNT_JSON` | future Play upload step (stub only) | Not used today |
+
+If any of the four signing secrets is missing the Gradle script falls
+back to **debug signing** so local + CI builds still succeed — but Play
+would reject a debug-signed AAB, which is the intentional guard. The
+startup line `[Mozai] Release signing: PRODUCTION (...)` vs
+`DEBUG fallback (...)` makes the active mode visible in the build log.
+
+### Creating the upload keystore (one-time, do this locally)
+
+```sh
+# 1. Generate the upload keystore. Pick a strong store password and
+#    key password (they can be the same for a single-alias keystore).
+keytool -genkeypair -v \
+  -keystore mozai-release.keystore \
+  -keyalg RSA -keysize 2048 -validity 10000 \
+  -alias mozai-upload
+
+# 2. Base64-encode it for the GitHub Secret. Pipe DIRECTLY to clipboard
+#    — never commit the .b64 file.
+#    macOS:
+base64 -i mozai-release.keystore | pbcopy
+#    Linux:
+base64 -w 0 mozai-release.keystore | xclip -selection clipboard
+
+# 3. In GitHub repo → Settings → Secrets and variables → Actions, add:
+#      MOZAI_KEYSTORE_BASE64      paste the base64 string
+#      MOZAI_KEYSTORE_PASSWORD    the store password
+#      MOZAI_KEY_ALIAS            mozai-upload
+#      MOZAI_KEY_PASSWORD         the key password
+
+# 4. Store mozai-release.keystore offline (1Password / Bitwarden /
+#    encrypted USB). Losing it means we can't publish updates to the
+#    same app on Play — recovery requires a Play Console support case.
+```
+
+The decoded `android/app/mozai-release.keystore` is gitignored so a
+fat-fingered `git add .` cannot leak it. CI materialises it from the
+secret at job time and the runner is reclaimed afterwards.
+
+---
+
+## Acceptance criteria
+
+The foundation PR is considered complete when **all** of:
+
+- [x] `npm install` + `npm run build` succeed
+- [x] `npx cap sync android` succeeds
+- [ ] Portrait & landscape: placeholder grid fully visible, centered, never clipped, never under banner
+- [ ] Rotating the device re-fits the grid correctly (no gaps, no overflow)
+- [ ] Opening the soft keyboard does not break layout (grid re-fits, banner stays put)
+- [ ] Banner is full-width, pinned bottom; play area sits exactly above it, safe-area respected
+- [ ] With no AdMob secret set, test ids are used (verified in logs); real ids used when secret present
+- [ ] Debug readout confirms `#game.height == visualViewport.height − --banner-h` (± dpr rounding)
+- [ ] No console errors/warnings
+- [x] `grep -rn "innerHeight" src` is empty
+
+The unchecked items require a device build to verify — see the
+attached screenshots in the PR description.

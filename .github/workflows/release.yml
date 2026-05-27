@@ -1,0 +1,162 @@
+name: Mozai release
+
+# Produces a signed release APK and AAB on every merge to main, and on
+# manual workflow_dispatch runs. Artifacts only — no Play Store upload.
+# The Play-publish step is left as a clearly-commented stub below.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A given commit can be merged then re-merged after a revert; the
+# concurrency group keeps only the latest run alive so we don't pile
+# up release jobs on the same ref. We DO NOT cancel-in-progress on
+# `main` itself — partially-built artifacts would be misleading; we
+# let the prior run finish and the next run produce the next artifact.
+concurrency:
+  group: mozai-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build signed APK + AAB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Build web bundle
+        env:
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml; only per-
+          # placement ad-unit IDs come from secrets. MOZAI_ADMOB_TESTING
+          # is deliberately UNSET in release.yml — push-to-main is the
+          # production-artifact build path, so real ads should serve.
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
+        run: npm run build
+
+      - name: Sync Capacitor → Android
+        run: npx cap sync android
+
+      # Decode the upload keystore from the base64 secret into the
+      # exact path app/build.gradle expects. The keystore is a
+      # gitignored binary file; it is materialised here, used by the
+      # bundleRelease / assembleRelease tasks below, and discarded
+      # along with the runner. If the secret is missing the file is
+      # not created and the Gradle script falls back to debug signing
+      # (Play would reject the resulting AAB, which is the desired
+      # guard — a missing secret should not silently ship a debug-
+      # signed release).
+      - name: Decode release keystore
+        if: ${{ env.HAS_KEYSTORE == '1' }}
+        env:
+          HAS_KEYSTORE: ${{ secrets.MOZAI_KEYSTORE_BASE64 != '' && '1' || '0' }}
+          MOZAI_KEYSTORE_BASE64: ${{ secrets.MOZAI_KEYSTORE_BASE64 }}
+        run: |
+          set -e
+          mkdir -p android/app
+          printf '%s' "$MOZAI_KEYSTORE_BASE64" | base64 -d > android/app/mozai-release.keystore
+          # Sanity: file should be > 0 bytes.
+          test -s android/app/mozai-release.keystore
+          echo "Keystore materialised: $(stat -c %s android/app/mozai-release.keystore) bytes"
+
+      - name: Build release AAB + APK
+        working-directory: android
+        env:
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml — Gradle no
+          # longer needs any AdMob env injection. The web build
+          # above is the only place that consumes the ad-unit ID
+          # secrets.
+          # Signing credentials. Empty values trigger app/build.gradle's
+          # debug-signing fallback so the build still succeeds (with a
+          # clearly-logged "DEBUG fallback" mode line).
+          MOZAI_KEYSTORE_PASSWORD: ${{ secrets.MOZAI_KEYSTORE_PASSWORD }}
+          MOZAI_KEY_ALIAS: ${{ secrets.MOZAI_KEY_ALIAS }}
+          MOZAI_KEY_PASSWORD: ${{ secrets.MOZAI_KEY_PASSWORD }}
+        run: ./gradlew bundleRelease assembleRelease --no-daemon --stacktrace
+
+      # Locate + sanity-check the artifacts before upload. Naming
+      # follows the Capacitor / AGP defaults; if either of these
+      # changes upstream the build will still succeed but the upload
+      # step would then fail loudly here rather than producing an
+      # empty artifact.
+      - name: Stage artifacts
+        run: |
+          set -e
+          AAB="android/app/build/outputs/bundle/release/app-release.aab"
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          # AGP sometimes emits an unsigned APK suffix when no signing
+          # config is attached; the debug-fallback path attaches the
+          # debug config so this should not happen, but log either way.
+          ls -la android/app/build/outputs/bundle/release/ || true
+          ls -la android/app/build/outputs/apk/release/ || true
+          test -f "$AAB"
+          test -f "$APK"
+          echo "AAB: $(stat -c %s "$AAB") bytes"
+          echo "APK: $(stat -c %s "$APK") bytes"
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: mozai-aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: mozai-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      # -----------------------------------------------------------------
+      # FUTURE: Google Play upload (intentionally left as a stub).
+      #
+      # When we are ready to publish from CI:
+      #
+      #   1. Create a Play Console service account, grant it "Release
+      #      manager" on the Mozai app, and download the JSON key.
+      #   2. Save it as the GitHub Actions secret MOZAI_PLAY_SERVICE_ACCOUNT_JSON
+      #      (paste the raw JSON, not base64 — the action accepts both).
+      #   3. Uncomment the block below and pick the right `track`
+      #      (`internal` for closed testing, `production` for live).
+      #
+      # The official action handles the upload, the version bump dance,
+      # and the staged rollout flag.
+      #
+      # - name: Upload AAB to Play (closed testing)
+      #   if: ${{ secrets.MOZAI_PLAY_SERVICE_ACCOUNT_JSON != '' }}
+      #   uses: r0adkll/upload-google-play@v1
+      #   with:
+      #     serviceAccountJsonPlainText: ${{ secrets.MOZAI_PLAY_SERVICE_ACCOUNT_JSON }}
+      #     packageName: com.moonstreamtech.mozai
+      #     releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
+      #     track: internal
+      #     status: completed
+      # -----------------------------------------------------------------
+
+      - name: Summary
+        run: |
+          echo "::notice title=Mozai release artifacts::Built mozai-aab + mozai-apk."
+          echo "Artifacts retained for 30 days. No Play Store upload performed."

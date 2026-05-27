@@ -1,0 +1,121 @@
+name: Mozai build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: mozai-build-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web — typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Run the play-area-sizing gate BEFORE the build so a regression
+      # fails fast. The grep MUST return zero matches; any literal use
+      # of `innerHeight` in src/ is a sign that a resize regression has
+      # crept in. Resize sizing always goes through ResizeObserver(#game).
+      - name: Play-area sizing gate
+        run: |
+          set -e
+          if grep -rn 'innerHeight' src; then
+            echo "FAIL: 'innerHeight' found in src/ — play-area sizing must use ResizeObserver(#game)."
+            exit 1
+          fi
+          echo "PASS: no innerHeight in src/."
+
+      - name: Build (typecheck + vite)
+        env:
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml; only per-
+          # placement ad-unit IDs come from secrets.
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
+          # Force test creatives on this CI build so any AAB pulled
+          # off CI for a personal-device install can't accidentally
+          # serve real ads. CI never runs human-tap-tests, so this
+          # is the safer default.
+          MOZAI_ADMOB_TESTING: '1'
+        run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mozai-web-dist
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  android:
+    name: Android — debug APK
+    runs-on: ubuntu-latest
+    needs: web
+    # The Android job runs after the web build so a typecheck failure
+    # short-circuits before we spin up the (slower) Android toolchain.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-34 build-tools;34.0.0 platform-tools'
+
+      - run: npm ci
+
+      - name: Web build (for cap sync)
+        env:
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
+          MOZAI_ADMOB_TESTING: '1'
+        run: npm run build
+
+      - name: cap sync android
+        run: npx cap sync android
+
+      - name: Gradle assembleDebug
+        working-directory: android
+        # The AdMob App ID is hardcoded in AndroidManifest.xml; the
+        # Gradle build no longer needs any AdMob env injection.
+        run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mozai-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      # NOTE on Last Tile's "Layer 4" test-id content scan: it
+      # doesn't translate cleanly to this stack. Our JS bundle
+      # always includes the Google test publisher prefix as a
+      # fallback string constant (src/env.ts's
+      # ADMOB_TEST_BANNER_UNIT_ID / ADMOB_TEST_REWARDED_UNIT_ID), so
+      # grepping the APK for the prefix would always hit even when
+      # the runtime uses real IDs. We rely instead on:
+      #   - MOZAI_ADMOB_TESTING='1' set on every CI artifact (above)
+      #     so device-installable debug APKs never serve real ads.
+      #   - Visible boot diag (`admob: ids=... testing=...`) in the
+      #     🐞 popup confirms the mode on device.
+      #   - release.yml deciding when to omit MOZAI_ADMOB_TESTING.

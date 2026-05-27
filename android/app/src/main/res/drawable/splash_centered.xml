@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Launch / splash background.
+    Wraps the existing density-resolved @drawable/splash bitmaps in a
+    layer-list so the inner bitmap can specify android:gravity="center"
+    (and tileMode="disabled"). The default window background mode is
+    "stretch to fill", which on a phone-sized screen squeezes the
+    bundled splash image horizontally and the logo inside it ends up
+    visibly distorted vs the square app icon.
+    A solid background colour fills the rest of the screen so the
+    centered logo doesn't sit on a transparent gap.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/splashBackground" />
+    <item>
+        <bitmap
+            android:src="@drawable/splash"
+            android:gravity="center"
+            android:tileMode="disabled" />
+    </item>
+</layer-list>
