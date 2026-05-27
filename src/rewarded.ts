@@ -4,57 +4,50 @@
  * `showRewarded()` displays a single rewarded video. Resolves true ONLY
  * when the user completes the ad and earns the reward. Returns false
  * on dismiss, error, or any state that does NOT grant the reward —
- * the caller can then leave the hint locked without ambiguity.
+ * the caller can then leave the hint locked without ambiguity. NEVER
+ * throws an unhandled rejection (every native call is wrapped).
  *
  * Why separate from banner.ts: the banner is a long-lived background
  * view (init once, leave it up), while the rewarded ad is a transient
  * modal flow that the colour-by-number scene starts in response to a
- * user tap on the hint button. Keeping them split keeps the API
- * surfaces obvious — the paint scene never has to think about banner
- * lifecycle, and main.ts never has to think about rewarded flow.
+ * user tap on the hint button.
  *
- * Plugin is lazily imported behind a typeof guard so the web bundle
- * stays free of native code references. Web / dev / preview falls
- * back to `window.confirm` so the rest of the hint flow can be
- * exercised end-to-end without a real ad — the confirm dialog mirrors
- * the "earn / decline" decision the user faces in production.
+ * --- The "AdMob.then() not implemented" trap ---
+ *
+ * Capacitor's plugin proxy intercepts ALL property access on the
+ * plugin object, including the standard `.then` property that
+ * JavaScript uses to detect thenables. Returning the proxy from an
+ * `async` function (e.g. `async function loadPlugin() { return AdMob }`)
+ * makes the runtime treat AdMob as a thenable, call `AdMob.then(...)`,
+ * which the proxy forwards to native — native has no `then` method
+ * and the call rejects with `"AdMob.then() is not implemented on
+ * android"`. That landed as an unhandled rejection and crashed the
+ * Hint button. Fix: wrap the plugin in a plain object (`{ mod }`)
+ * before returning it from any async function, and never await the
+ * plugin proxy directly. We use `holder.mod.AdMob` at the call site
+ * so the proxy is only ever used as a method receiver, never as a
+ * thenable.
+ *
+ * Web/dev (no native AdMob): falls back to window.confirm so the rest
+ * of the hint flow can be exercised end-to-end without a real ad.
  */
 
 import type { AdMobConfig } from './env.js';
+import { diagLog } from './error-overlay.js';
 
-interface RewardItem {
-  type: string;
-  amount: number;
-}
-
-interface RewardedListener {
-  remove: () => Promise<void>;
-}
-
-interface AdMobRewardedShape {
-  prepareRewardVideoAd: (opts: { adId: string; isTesting?: boolean }) => Promise<void>;
-  showRewardVideoAd: () => Promise<RewardItem | undefined>;
-  addListener: (
-    event:
-      | 'onRewardedVideoAdReward'
-      | 'onRewardedVideoAdDismissed'
-      | 'onRewardedVideoAdFailedToLoad'
-      | 'onRewardedVideoAdFailedToShow',
-    cb: (info?: unknown) => void,
-  ) => Promise<RewardedListener>;
-}
+type AdMobModule = typeof import('@capacitor-community/admob');
 
 interface CapacitorRuntime {
   isNativePlatform: () => boolean;
 }
 
-let cachedAdMob: AdMobRewardedShape | null = null;
+let cachedHolder: { mod: AdMobModule } | null = null;
+let moduleLoadAttempted = false;
 let cachedConfig: AdMobConfig | null = null;
 
 /**
- * Cache the config the paint scene was booted with. The scene calls
- * this once at mount and again on teardown (with null) so the module
- * never carries a stale config across scene swaps.
+ * Cache the config the paint scene was booted with. main.ts calls this
+ * once at boot.
  */
 export function setRewardedConfig(config: AdMobConfig | null): void {
   cachedConfig = config;
@@ -65,15 +58,25 @@ function isNative(): boolean {
   return !!cap && cap.isNativePlatform();
 }
 
-async function loadPlugin(): Promise<AdMobRewardedShape | null> {
-  if (cachedAdMob) return cachedAdMob;
+/**
+ * Lazy-import @capacitor-community/admob. The dynamic import keeps
+ * the plugin out of the web bundle when no Capacitor runtime is
+ * present (where the plugin proxy would no-op anyway). We wrap the
+ * loaded module in `{ mod: ... }` so the AdMob proxy is never the
+ * direct value of any awaited Promise — see the file header for the
+ * "AdMob.then()" trap that motivated this.
+ */
+async function ensureHolder(): Promise<{ mod: AdMobModule } | null> {
+  if (cachedHolder) return cachedHolder;
+  if (moduleLoadAttempted) return null;
+  moduleLoadAttempted = true;
+  if (!isNative()) return null;
   try {
     const mod = await import(/* @vite-ignore */ '@capacitor-community/admob');
-    cachedAdMob = mod.AdMob as unknown as AdMobRewardedShape;
-    return cachedAdMob;
+    cachedHolder = { mod: mod as unknown as AdMobModule };
+    return cachedHolder;
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[Mozai] AdMob plugin missing — rewarded falls back to web confirm.', err);
+    diagLog(`hint: plugin import failed: ${(err as Error)?.message ?? String(err)}`);
     return null;
   }
 }
@@ -82,22 +85,21 @@ async function loadPlugin(): Promise<AdMobRewardedShape | null> {
  * Show one rewarded ad. Resolves `true` iff the user completed it
  * and earned the reward.
  *
- * Behaviour map:
- *   - Native + plugin available + reward fires → true
- *   - Native + plugin available + ad dismissed without reward → false
- *   - Native + plugin available + load/show error → false (logged)
- *   - Native + plugin missing → web fallback (confirm)
- *   - Web / dev → confirm dialog ("Watch ad? OK = earn, Cancel = skip")
+ * Flow:
+ *   1. prepareRewardVideoAd — loads the creative
+ *   2. showRewardVideoAd    — presents it; returns AdMobRewardItem
+ *                              when the reward is earned, REJECTS on
+ *                              dismiss / no-fill / error
+ *   3. interpret return value (amount > 0 => reward earned)
  *
- * Each call prepares a fresh rewarded — the underlying plugin caches
- * one creative at a time, so prepare-on-demand keeps the API simple
- * and the served creative recent.
+ * Every plugin call is awaited inside a try/catch so any failure
+ * (network, no-fill, user dismiss, plugin proxy quirks) becomes a
+ * `return false` rather than an uncaught rejection.
  */
 export async function showRewarded(): Promise<boolean> {
   const config = cachedConfig;
   if (!config) {
-    // eslint-disable-next-line no-console
-    console.warn('[Mozai] showRewarded() called without setRewardedConfig() — denying.');
+    diagLog('hint: showRewarded() with no config — denying');
     return false;
   }
 
@@ -105,59 +107,47 @@ export async function showRewarded(): Promise<boolean> {
     return webFallback(config.mode);
   }
 
-  const plugin = await loadPlugin();
-  if (!plugin) {
+  const holder = await ensureHolder();
+  if (!holder) {
+    diagLog('hint: native AdMob plugin unavailable — falling back to confirm');
     return webFallback(config.mode);
   }
 
-  // Subscribe BEFORE show so we never miss the reward event. The
-  // reward listener resolves the outer promise; the dismiss /
-  // error listeners resolve it as false. The race is settled by
-  // whichever event fires first.
-  return new Promise<boolean>((resolve) => {
-    let settled = false;
-    const settle = (value: boolean): void => {
-      if (settled) return;
-      settled = true;
-      Promise.all([
-        rewardSub.then((s) => s.remove()).catch(() => undefined),
-        dismissSub.then((s) => s.remove()).catch(() => undefined),
-        loadFailSub.then((s) => s.remove()).catch(() => undefined),
-        showFailSub.then((s) => s.remove()).catch(() => undefined),
-      ]).finally(() => resolve(value));
-    };
+  // Local reference. NEVER awaited directly — only used as a method
+  // receiver for `AdMob.somethingAsync()`.
+  const AdMob = holder.mod.AdMob;
 
-    const rewardSub = plugin.addListener('onRewardedVideoAdReward', () => settle(true));
-    const dismissSub = plugin.addListener('onRewardedVideoAdDismissed', () => settle(false));
-    const loadFailSub = plugin.addListener('onRewardedVideoAdFailedToLoad', (err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[Mozai] rewarded ad failed to load', err);
-      settle(false);
+  try {
+    diagLog(`hint: prepare adId=${maskAdId(config.rewardedUnitId)} isTesting=${config.mode === 'TEST'}`);
+    await AdMob.prepareRewardVideoAd({
+      adId: config.rewardedUnitId,
+      isTesting: config.mode === 'TEST',
     });
-    const showFailSub = plugin.addListener('onRewardedVideoAdFailedToShow', (err) => {
-      // eslint-disable-next-line no-console
-      console.warn('[Mozai] rewarded ad failed to show', err);
-      settle(false);
-    });
+    diagLog('hint: show');
+    const reward = await AdMob.showRewardVideoAd();
+    const amount = reward && typeof reward.amount === 'number' ? reward.amount : 0;
+    const type = reward && typeof reward.type === 'string' ? reward.type : '';
+    const rewarded = amount > 0;
+    diagLog(`hint: rewarded type=${type || '?'} amount=${amount} -> grant=${rewarded}`);
+    return rewarded;
+  } catch (err) {
+    const msg = (err as Error)?.message ?? String(err);
+    diagLog(`hint: dismissed/failed reason=${msg}`);
+    return false;
+  }
+}
 
-    plugin
-      .prepareRewardVideoAd({ adId: config.rewardedUnitId, isTesting: config.mode === 'TEST' })
-      .then(() => plugin.showRewardVideoAd())
-      .catch((err) => {
-        // eslint-disable-next-line no-console
-        console.warn('[Mozai] rewarded prepare/show threw', err);
-        settle(false);
-      });
-  });
+function maskAdId(id: string): string {
+  // Show only the prefix so the diag log is useful without leaking
+  // the real publisher's unit id to whoever can read the popup.
+  if (!id) return '(empty)';
+  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
 }
 
 function webFallback(mode: AdMobConfig['mode']): boolean {
-  // window.confirm is synchronous and blocking — fine for dev/preview
-  // where the user is interacting in a browser. Wrapped in a runtime
-  // check so a headless environment (e.g. tests later) can be detected
-  // by replacing window.confirm.
   const granted = window.confirm(
     `[${mode}] Rewarded ad placeholder.\n\nOK = grant reward (reveal hint).\nCancel = decline.`,
   );
+  diagLog(`hint: web fallback confirm -> grant=${granted}`);
   return granted;
 }
