@@ -17,7 +17,6 @@
  * message.
  */
 
-import { bootLog } from './error-overlay.js';
 import { resolveContent } from './content-resolver.js';
 
 export interface PuzzleMeta {
@@ -71,7 +70,6 @@ export class ContentResolveError extends Error {
 export async function loadContentIndex(): Promise<ContentIndex> {
   const path = 'content/index.json';
   const result = await resolveContent(path);
-  bootLog(`index ${path}: source=${result.source}`);
   if (result.source === 'FAILED') {
     throw new ContentResolveError(path);
   }

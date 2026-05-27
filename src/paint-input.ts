@@ -21,7 +21,6 @@
 
 import type { PaintRenderer, CameraLimits } from './paint-render.js';
 import type { PaintState } from './paint-state.js';
-import { diagLog } from './error-overlay.js';
 
 export interface PaintInputDeps {
   canvas: HTMLCanvasElement;
@@ -35,6 +34,11 @@ export interface PaintInputDeps {
    * react to puzzle completion.
    */
   onCellFilled: (cellIndex: number, colorIndex: number, completed: boolean) => void;
+  /**
+   * Called whenever a pan or zoom changes the camera. Used by the
+   * scene to toggle the minimap on/off as the user zooms past fit.
+   */
+  onCameraChange?: () => void;
   limits: () => CameraLimits;
 }
 
@@ -168,7 +172,7 @@ export class PaintInput {
     const pos = this.getLocalPos(e);
     // Negative deltaY = scroll up = zoom in (matches Google Maps).
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    this.zoomAround(pos.x, pos.y, factor, 'wheel');
+    this.zoomAround(pos.x, pos.y, factor);
   }
 
   private beginPanZoom(): void {
@@ -196,7 +200,7 @@ export class PaintInput {
     // the gesture midpoint via the world-coord pin below so the
     // image scales about the fingers, not a corner.
     const desiredZoom = this.pinchStartZoom * (dist / this.pinchStartDist);
-    const newZoom = this.applyZoom(desiredZoom, 'pinch');
+    const newZoom = this.applyZoom(desiredZoom);
 
     // World coordinate that was under the gesture midpoint at start —
     // we keep it pinned under the moving midpoint as zoom changes.
@@ -206,59 +210,48 @@ export class PaintInput {
     this.deps.renderer.camera.offsetY = worldY - midY / newZoom;
     this.deps.renderer.clampCamera();
     this.deps.renderer.scheduleFrame();
+    this.deps.onCameraChange?.();
   }
 
   /**
    * Zoom around a screen point — used for wheel zoom and the +/- UI
    * buttons. Keeps the cell currently under the anchor stationary.
-   *
-   * `source` is one of 'pinch' | 'plus' | 'minus' | 'wheel' so the
-   * diag log makes it unambiguous which path triggered a given
-   * zoom change.
    */
-  zoomAround(screenX: number, screenY: number, factor: number, source: string): void {
+  zoomAround(screenX: number, screenY: number, factor: number): void {
     const cam = this.deps.renderer.camera;
     const oldZoom = cam.zoom;
     const desired = oldZoom * factor;
     const worldX = cam.offsetX + screenX / oldZoom;
     const worldY = cam.offsetY + screenY / oldZoom;
-    const newZoom = this.applyZoom(desired, source);
+    const newZoom = this.applyZoom(desired);
     if (newZoom === oldZoom) return;
     cam.offsetX = worldX - screenX / newZoom;
     cam.offsetY = worldY - screenY / newZoom;
     this.deps.renderer.clampCamera();
     this.deps.renderer.scheduleFrame();
+    this.deps.onCameraChange?.();
   }
 
   /** Centre-anchored zoom (for the +/- UI buttons). */
-  zoomCentered(factor: number, source: 'plus' | 'minus'): void {
+  zoomCentered(factor: number): void {
     const r = this.deps.canvas.getBoundingClientRect();
-    this.zoomAround(r.width / 2, r.height / 2, factor, source);
+    this.zoomAround(r.width / 2, r.height / 2, factor);
   }
 
   /**
-   * Single chokepoint for changing camera.zoom. Clamps to the
-   * current limits and emits a diag line so direction + clamping
-   * is verifiable on device. Returns the (clamped) new zoom.
-   *
-   * Every zoom-change path (pinch, +, −, wheel) MUST go through
-   * here — the previous bug was a hardcoded maxZoom < fitZoom in
-   * the renderer which made clamp() collapse to a binary toggle.
-   * Routing through one helper keeps the assertion and the log in
-   * one place.
+   * Single chokepoint for changing camera.zoom. Every zoom-change
+   * path (pinch, +, −, wheel) MUST go through here — the previous
+   * bug was a hardcoded maxZoom < fitZoom in the renderer which
+   * made clamp() collapse to a binary toggle. Routing through one
+   * helper keeps the assertion in one place.
    */
-  private applyZoom(desired: number, source: string): number {
+  private applyZoom(desired: number): number {
     const cam = this.deps.renderer.camera;
     const limits = this.deps.limits();
-    const oldZoom = cam.zoom;
     let clamped = desired;
     if (clamped < limits.minZoom) clamped = limits.minZoom;
     if (clamped > limits.maxZoom) clamped = limits.maxZoom;
     cam.zoom = clamped;
-    diagLog(
-      `zoom set: from=${oldZoom.toFixed(3)} to=${clamped.toFixed(3)} ` +
-        `min=${limits.minZoom.toFixed(3)} max=${limits.maxZoom.toFixed(3)} source=${source}`,
-    );
     return clamped;
   }
 

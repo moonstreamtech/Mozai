@@ -149,40 +149,21 @@ With `MOZAI_DEBUG=1` the JS console exposes
 `window.__mozaiDebug.markCompleted(id)` and `.resetProgress()` for
 verifying the % fill and lock progression without playing through.
 
-### On-screen boot diagnostics strip (temporary)
+### Error overlay
 
-`src/error-overlay.ts` ships an always-on-screen boot diagnostics
-strip that prints the boot sequence and post-mount layout probe
-(`#game` height, `--banner-h`, `.scene` rect, first-tile rect) on
-the device itself. It exists so a blank-screen failure can be
-debugged without `adb logcat`.
-
-It is **OFF by default**. To re-enable for a one-off device debug
-session, set the `VITE_BOOT_DEBUG` env var at build time:
-
-```sh
-VITE_BOOT_DEBUG=1 npm run build
-npx cap sync android
-```
-
-The red-panel error overlay (synchronous throw / unhandled rejection)
-stays armed regardless of this flag — only the always-visible strip
-is gated off.
-The `bootLog()` machinery itself is also unaffected: log lines still
-go to `console.info` and stay buffered, so a `reportError()` later
-in the boot still surfaces them in the error panel.
+`src/error-overlay.ts` installs global `error` / `unhandledrejection`
+handlers that surface any thrown exception as a full-screen red panel.
+Lazily created on the first error — an idle session carries zero
+overlay DOM.
 
 ### Pre-release flag checklist
 
-All four toggles below are at their production values on `main`.
-Re-confirm before tagging a release if anyone has been debugging
-locally:
+Toggles below are at their production values on `main`. Re-confirm
+before tagging a release if anyone has been debugging locally:
 
 | Constant / env var | File / source | Production value | Notes |
 | --- | --- | --- | --- |
-| `SHOW_DEBUG_BUTTON` | `src/error-overlay.ts` | `false` ✓ | Hides the 🐞 button + popup. Also silences `bootLog` / `diagLog` (early-return in `DIAGNOSTICS_ENABLED` gate) so production builds have no diagnostic console noise. `reportError` (red panel) stays armed regardless. |
 | `UNLOCK_ALL_ROOMS` | `src/scene-rooms.ts` | `false` ✓ | Real lock chain active — room K (K ≥ 2) unlocked iff `completedCountForRoom(K-1) >= K`. |
-| `VITE_BOOT_DEBUG` | env at build time | unset ✓ | Boot diagnostics strip off. |
 | `MOZAI_ADMOB_TESTING` | env at build time | unset for production ✓ | `release.yml` omits it (real ads serve). `build.yml` sets `'1'` so PR debug APKs always test — keep that. |
 
 ### Adding a test device for real-ads builds

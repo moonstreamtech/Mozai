@@ -1,6 +1,6 @@
 /*
  * Content resolver — decides bundled vs cache vs network for any
- * content file path, with diagnostics in the 🐞 popup.
+ * content file path.
  *
  * Three resolution buckets:
  *
@@ -33,7 +33,6 @@
  */
 
 import { CDN_BASE } from './env.js';
-import { diagLog } from './error-overlay.js';
 import { readCache, writeCache } from './content-cache.js';
 
 export type ContentSource = 'bundled' | 'cache' | 'network' | 'FAILED';
@@ -84,26 +83,13 @@ function joinUrl(base: string, path: string): string {
 }
 
 export async function resolveContent(path: string): Promise<ResolveResult> {
-  const start = Date.now();
-
   if (isBundledPath(path)) {
     try {
       const res = await fetch(path, { cache: 'no-store' });
-      if (!res.ok) {
-        diagLog(
-          `content resolve ${path}: source=bundled ok=false status=${res.status} ms=${Date.now() - start}`,
-        );
-        return { text: '', source: 'FAILED' };
-      }
+      if (!res.ok) return { text: '', source: 'FAILED' };
       const text = await res.text();
-      diagLog(
-        `content resolve ${path}: source=bundled ok=true ms=${Date.now() - start}`,
-      );
       return { text, source: 'bundled' };
-    } catch (err) {
-      diagLog(
-        `content resolve ${path}: source=bundled ok=false err=${(err as Error)?.message ?? err} ms=${Date.now() - start}`,
-      );
+    } catch {
       return { text: '', source: 'FAILED' };
     }
   }
@@ -112,9 +98,6 @@ export async function resolveContent(path: string): Promise<ResolveResult> {
   const cacheKey = stripContentPrefix(path);
   const cached = await readCache(cacheKey);
   if (cached !== null) {
-    diagLog(
-      `content resolve ${path}: source=cache ok=true ms=${Date.now() - start}`,
-    );
     return { text: cached, source: 'cache' };
   }
 
@@ -130,20 +113,10 @@ export async function resolveContent(path: string): Promise<ResolveResult> {
     const text = fetchOutcome.text;
     // Fire-and-forget cache write. The user has the content already;
     // a write failure (disk full, permission) shouldn't fail the
-    // resolve. Log so future debug sessions can tell.
-    writeCache(cacheKey, text).catch((err) => {
-      diagLog(
-        `cache write failed for ${cacheKey}: ${(err as Error)?.message ?? err}`,
-      );
-    });
-    diagLog(
-      `content resolve ${path}: source=network ok=true ms=${Date.now() - start}`,
-    );
+    // resolve.
+    writeCache(cacheKey, text).catch(() => {});
     return { text, source: 'network' };
   }
-  diagLog(
-    `content offline: ${path} no cache, no network (${fetchOutcome.reason})`,
-  );
   return { text: '', source: 'FAILED' };
 }
 
@@ -161,13 +134,11 @@ type FetchOutcome =
 async function fetchWithRetry(url: string): Promise<FetchOutcome> {
   let lastReason = 'unknown';
   for (let k = 1; k <= MAX_ATTEMPTS; k++) {
-    diagLog(`content fetch attempt ${k}/${MAX_ATTEMPTS}: ${url}`);
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
     try {
       const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
       clearTimeout(timeoutId);
-      diagLog(`content status: ${res.status} for ${url}`);
       if (res.ok) {
         const text = await res.text();
         return { kind: 'ok', text };
@@ -186,11 +157,9 @@ async function fetchWithRetry(url: string): Promise<FetchOutcome> {
       // land here. Treat them all as transient — they're exactly
       // the case the retry loop exists for.
       lastReason = (err as Error)?.message ?? String(err);
-      diagLog(`content fetch attempt ${k}/${MAX_ATTEMPTS} threw: ${lastReason}`);
     }
     if (k < MAX_ATTEMPTS) {
       const wait = BACKOFF_BASE_MS * (1 << (k - 1)); // 500, 1000, 2000
-      diagLog(`content retry: waiting ${wait}ms before attempt ${k + 1}`);
       await sleep(wait);
     }
   }

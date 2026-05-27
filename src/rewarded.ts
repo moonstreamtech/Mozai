@@ -32,8 +32,7 @@
  * of the hint flow can be exercised end-to-end without a real ad.
  */
 
-import { maskAdId, type AdMobConfig } from './env.js';
-import { diagLog } from './error-overlay.js';
+import { type AdMobConfig } from './env.js';
 
 type AdMobModule = typeof import('@capacitor-community/admob');
 
@@ -75,8 +74,7 @@ async function ensureHolder(): Promise<{ mod: AdMobModule } | null> {
     const mod = await import(/* @vite-ignore */ '@capacitor-community/admob');
     cachedHolder = { mod: mod as unknown as AdMobModule };
     return cachedHolder;
-  } catch (err) {
-    diagLog(`hint: plugin import failed: ${(err as Error)?.message ?? String(err)}`);
+  } catch {
     return null;
   }
 }
@@ -98,10 +96,7 @@ async function ensureHolder(): Promise<{ mod: AdMobModule } | null> {
  */
 export async function showRewarded(): Promise<boolean> {
   const config = cachedConfig;
-  if (!config) {
-    diagLog('hint: showRewarded() with no config — denying');
-    return false;
-  }
+  if (!config) return false;
 
   if (!isNative()) {
     return webFallback(config.mode);
@@ -109,7 +104,6 @@ export async function showRewarded(): Promise<boolean> {
 
   const holder = await ensureHolder();
   if (!holder) {
-    diagLog('hint: native AdMob plugin unavailable — falling back to confirm');
     return webFallback(config.mode);
   }
 
@@ -118,33 +112,20 @@ export async function showRewarded(): Promise<boolean> {
   const AdMob = holder.mod.AdMob;
 
   try {
-    diagLog(
-      `hint: prepare adId=${maskAdId(config.rewardedUnitId)} ` +
-        `isTesting=${config.isTesting} mode=${config.mode} ` +
-        `forceTesting=${config.forceTesting}`,
-    );
     await AdMob.prepareRewardVideoAd({
       adId: config.rewardedUnitId,
       isTesting: config.isTesting,
     });
-    diagLog('hint: show');
     const reward = await AdMob.showRewardVideoAd();
     const amount = reward && typeof reward.amount === 'number' ? reward.amount : 0;
-    const type = reward && typeof reward.type === 'string' ? reward.type : '';
-    const rewarded = amount > 0;
-    diagLog(`hint: rewarded type=${type || '?'} amount=${amount} -> grant=${rewarded}`);
-    return rewarded;
-  } catch (err) {
-    const msg = (err as Error)?.message ?? String(err);
-    diagLog(`hint: dismissed/failed reason=${msg}`);
+    return amount > 0;
+  } catch {
     return false;
   }
 }
 
 function webFallback(mode: AdMobConfig['mode']): boolean {
-  const granted = window.confirm(
+  return window.confirm(
     `[${mode}] Rewarded ad placeholder.\n\nOK = grant reward (reveal hint).\nCancel = decline.`,
   );
-  diagLog(`hint: web fallback confirm -> grant=${granted}`);
-  return granted;
 }

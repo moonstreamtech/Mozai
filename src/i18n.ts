@@ -15,9 +15,7 @@
  *      Brazilian-Portuguese device that doesn't have a `pt-BR` entry
  *      gets the generic `pt` strings instead of English.
  *   4. Final fallback: `en`.
- * The resolved tag is exposed via the `lang` constant; the original
- * navigator.language is logged once via diagLog so the chosen
- * locale is visible in the 🐞 popup.
+ * The resolved tag is exposed via the `lang` constant.
  *
  * RTL: when the resolved language is one of the RTL set
  * (ar / he / fa / ur), `<html dir="rtl">` is set so the few text
@@ -32,8 +30,6 @@
  *     key (so a typo is visible in the UI rather than rendering
  *     as undefined).
  */
-
-import { diagLog } from './error-overlay.js';
 
 // 50-language set. Tags follow BCP-47. Region variants
 // (pt-BR, zh-CN, zh-TW, nb) sit ALONGSIDE their base tags so
@@ -523,6 +519,42 @@ const STRINGS_NEEDS_INTERNET: LangMap = {
   ca: 'Cal internet per carregar aquesta sala (només la primera vegada).',
 };
 
+const STRINGS_START: LangMap = {
+  en: 'Start', es: 'Empezar', fr: 'Commencer', de: 'Starten', it: 'Inizia',
+  pt: 'Começar', 'pt-BR': 'Começar',
+  ru: 'Начать', uk: 'Почати', pl: 'Zacznij',
+  cs: 'Začít', sk: 'Začať',
+  ro: 'Începe', hu: 'Indítás', bg: 'Започни',
+  hr: 'Počni', sr: 'Почни', sl: 'Začni',
+  nl: 'Start', sv: 'Starta', da: 'Start', nb: 'Start', fi: 'Aloita',
+  el: 'Έναρξη', tr: 'Başla',
+  ja: '開始', ko: '시작',
+  'zh-CN': '开始', 'zh-TW': '開始',
+  ar: 'ابدأ', he: 'התחל', fa: 'شروع', ur: 'شروع',
+  hi: 'शुरू', bn: 'শুরু', ta: 'தொடங்கு', te: 'ప్రారంభించండి',
+  mr: 'सुरू', ml: 'ആരംഭിക്കുക', gu: 'શરૂ', kn: 'ಪ್ರಾರಂಭಿಸಿ', pa: 'ਸ਼ੁਰੂ',
+  id: 'Mulai', ms: 'Mula', vi: 'Bắt đầu', th: 'เริ่ม', fil: 'Simulan',
+  sw: 'Anza', af: 'Begin', ca: 'Comença',
+};
+
+const STRINGS_VIEW: LangMap = {
+  en: 'View', es: 'Ver', fr: 'Voir', de: 'Ansehen', it: 'Vedi',
+  pt: 'Ver', 'pt-BR': 'Ver',
+  ru: 'Смотреть', uk: 'Дивитись', pl: 'Zobacz',
+  cs: 'Zobrazit', sk: 'Zobraziť',
+  ro: 'Vezi', hu: 'Megnéz', bg: 'Виж',
+  hr: 'Pogledaj', sr: 'Погледај', sl: 'Poglej',
+  nl: 'Bekijken', sv: 'Visa', da: 'Vis', nb: 'Vis', fi: 'Katso',
+  el: 'Προβολή', tr: 'Görüntüle',
+  ja: '見る', ko: '보기',
+  'zh-CN': '查看', 'zh-TW': '檢視',
+  ar: 'عرض', he: 'הצג', fa: 'مشاهده', ur: 'دیکھیں',
+  hi: 'देखें', bn: 'দেখুন', ta: 'பார்', te: 'చూడండి',
+  mr: 'पाहा', ml: 'കാണുക', gu: 'જુઓ', kn: 'ನೋಡಿ', pa: 'ਦੇਖੋ',
+  id: 'Lihat', ms: 'Lihat', vi: 'Xem', th: 'ดู', fil: 'Tingnan',
+  sw: 'Tazama', af: 'Bekyk', ca: 'Mira',
+};
+
 const STRINGS_DONE_BADGE: LangMap = {
   en: '✓ Done', es: '✓ Listo', fr: '✓ OK', de: '✓ Fertig', it: '✓ Fatto',
   pt: '✓ Concluído', 'pt-BR': '✓ Concluído',
@@ -546,7 +578,8 @@ type StringKey =
   | 'noPicturesYet' | 'couldNotLoadThumbs' | 'couldNotLoadPuzzle' | 'retry'
   | 'hint' | 'hinted' | 'hintUnlocked'
   | 'done' | 'completeTitle' | 'completeFinished' | 'doneBadge'
-  | 'needsInternet';
+  | 'needsInternet'
+  | 'start' | 'view';
 
 const TABLE: Record<StringKey, LangMap> = {
   room: STRINGS_ROOM,
@@ -565,19 +598,20 @@ const TABLE: Record<StringKey, LangMap> = {
   completeFinished: STRINGS_COMPLETE_FINISHED,
   doneBadge: STRINGS_DONE_BADGE,
   needsInternet: STRINGS_NEEDS_INTERNET,
+  start: STRINGS_START,
+  view: STRINGS_VIEW,
 };
 
 export const lang: Lang = detectLang();
 
-// Boot diag + html lang/dir setup. Runs at module import so it's
-// done before any UI string is rendered.
+// html lang/dir setup. Runs at module import so it's done before any
+// UI string is rendered.
 {
   const rtl = RTL_LANGS.has(lang);
   if (document.documentElement) {
     document.documentElement.setAttribute('lang', lang);
     document.documentElement.setAttribute('dir', rtl ? 'rtl' : 'ltr');
   }
-  diagLog(`i18n: locale=${lang} from=${navigator.language || '(empty)'} rtl=${rtl}`);
 }
 
 export function t(key: StringKey, params?: Record<string, string | number>): string {

@@ -226,11 +226,6 @@ body {
    * over-reservation; the cost is a small blank strip at the
    * bottom of the scroll, which is invisible until the user
    * scrolls to the very end.
-   *
-   * The boot debug strip is a position:fixed overlay that COVERS
-   * the very top of the scene while debugging. It deliberately does
-   * NOT push the scene content down. The strip is OFF by default
-   * (VITE_BOOT_DEBUG=0).
    */
   position: absolute;
   inset: 0;
@@ -657,6 +652,97 @@ body {
 }
 
 /* ============================================================
+ * PREVIEW SCENE
+ *
+ * Interstitial between the room-interior tile tap and the paint
+ * scene. Shows the thumbnail, dimensions, palette dots, and a
+ * Start/View button.
+ * ============================================================ */
+
+.scene-preview {
+  /* Inherit .scene's vertical scroll + safe-area padding. The body
+     centers everything horizontally. */
+}
+
+.preview-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  max-width: 360px;
+  margin: 12px auto 0;
+  width: 100%;
+}
+
+.preview-thumb-frame {
+  /* The thumb sits inside a square frame that's 80% of the body
+     width — large enough to be the focal point without crowding
+     the dim+palette+CTA below. aspect-ratio with min-height fallback
+     so older WebViews still get a sensible box. */
+  position: relative;
+  width: 80%;
+  max-width: 280px;
+  aspect-ratio: 1 / 1;
+  min-height: 200px;
+  border: 2px solid #98a4b4;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+  overflow: hidden;
+}
+
+.preview-thumb-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #ffffff;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.preview-info {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border: 1px solid var(--scene-border);
+  border-radius: 10px;
+  background: var(--scene-bg);
+  min-width: 200px;
+}
+
+.preview-dim {
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: 2px;
+  color: var(--scene-ink);
+}
+
+.preview-palette {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
+.preview-palette-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  display: inline-block;
+}
+
+.preview-cta {
+  /* Slightly wider than the default cta-btn for thumb-press
+     comfort on a primary action. */
+  min-width: 220px;
+}
+
+/* ============================================================
  * PAINT SCENE
  *
  * Layout overrides the default `.scene` (which is overflow-y: auto for
@@ -701,8 +787,6 @@ body {
   padding: 8px 12px;
   border-bottom: 1px solid var(--scene-border);
   background: var(--scene-bg);
-  /* Top safe-area only — the boot strip is a position:fixed overlay
-     that does not push scene content (see .scene comment). */
   padding-top: calc(8px + env(safe-area-inset-top, 0px));
   padding-left: calc(12px + env(safe-area-inset-left, 0px));
   padding-right: calc(12px + env(safe-area-inset-right, 0px));
@@ -765,6 +849,13 @@ body {
     linear-gradient(45deg, transparent 75%, #f7f9fc 75%) 8px 8px/16px 16px,
     linear-gradient(-45deg, transparent 75%, #f7f9fc 75%) 8px 8px/16px 16px,
     #ffffff;
+  /* Thin neutral frame so the white canvas is visually delineated
+     from the surrounding scene — critical for room 100's 1000×1000
+     grid where, fully zoomed out, only the gridline dots are
+     visible without an explicit "this is the playing field" outline.
+     2px is enough to read at any zoom without competing for
+     attention with the actual artwork. */
+  border: 2px solid #98a4b4;
 }
 
 .paint-canvas {
@@ -789,6 +880,41 @@ body {
   gap: 6px;
   z-index: 2;
   pointer-events: none;
+}
+
+/*
+ * Minimap. Top-right corner under the topbar; shown only when the
+ * user is zoomed past fit (scene-paint toggles the `hidden`
+ * attribute). 90 CSS px square is large enough to read the picture
+ * AND the viewport rectangle on a phone screen without crowding
+ * the Hint button. The semi-transparent backdrop lets the canvas
+ * underneath still feel like the primary surface.
+ *
+ * The `[hidden]` rule wins over `display: block` (specificity
+ * class+attribute > class alone) — same pattern as
+ * .paint-loading[hidden] / .paint-completion[hidden].
+ */
+.paint-minimap {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 90px;
+  height: 90px;
+  display: block;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #98a4b4;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: pointer;
+}
+
+.paint-minimap[hidden] {
+  display: none;
 }
 
 .zoom-btn {

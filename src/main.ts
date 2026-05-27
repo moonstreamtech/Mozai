@@ -31,9 +31,10 @@ import { load as loadProgress, debugMarkCompleted, debugReset } from './progress
 import { SceneManager } from './scenes.js';
 import { roomsSceneMount } from './scene-rooms.js';
 import { makeRoomSceneMount } from './scene-room.js';
+import { makePreviewSceneMount } from './scene-preview.js';
 import { makePaintSceneMount } from './scene-paint.js';
 import { setRewardedConfig } from './rewarded.js';
-import { bootLog, installErrorOverlay, reportError } from './error-overlay.js';
+import { installErrorOverlay, reportError } from './error-overlay.js';
 
 // Install global error capture as the very first runtime side-effect.
 // Any synchronous throw between here and boot()'s catch will land on
@@ -47,14 +48,10 @@ function requireEl<T extends HTMLElement>(id: string): T {
 }
 
 async function boot(): Promise<void> {
-  bootLog(`boot() start — href=${location.href}`);
-  bootLog(`ua=${navigator.userAgent}`);
-
   const gameEl = requireEl<HTMLDivElement>('game');
   const canvasEl = requireEl<HTMLCanvasElement>('play-canvas');
   const bannerEl = requireEl<HTMLDivElement>('banner');
   const debugEl = requireEl<HTMLDivElement>('debug');
-  bootLog('DOM hooks ok (#game, #play-canvas, #banner, #debug)');
 
   const debug = isDebugReadoutEnabled() ? mountDebugReadout(debugEl) : null;
 
@@ -65,7 +62,6 @@ async function boot(): Promise<void> {
     render: makePlaceholderGrid(),
     onFit: (info) => debug?.update(info),
   });
-  bootLog('resize controller attached');
 
   if (debug) {
     window.addEventListener('mozai:banner-height-changed', (e: Event) => {
@@ -77,16 +73,14 @@ async function boot(): Promise<void> {
   }
 
   const adConfig = readAdMobConfig();
-  // Full AdMob mode dump for the 🐞 popup. Publisher prefix is
-  // visible (not secret) so we can confirm REAL vs TEST placements
-  // at a glance; the rest of the unit id is masked.
-  bootLog(
-    `admob: ids=${adConfig.mode} testing=${adConfig.isTesting} ` +
-      `forceTesting=${adConfig.forceTesting} ` +
+  // Surface real-vs-test placement at a glance during dev. maskAdId
+  // keeps the unit suffix masked.
+  // eslint-disable-next-line no-console
+  console.info(
+    `[Mozai] admob mode=${adConfig.mode} testing=${adConfig.isTesting} ` +
       `banner=${maskAdId(adConfig.bannerUnitId)} ` +
       `rewarded=${maskAdId(adConfig.rewardedUnitId)}`,
   );
-  bootLog(`config: base=${import.meta.env.BASE_URL ?? '(unset)'}`);
 
   initBanner({ config: adConfig, bannerEl }).catch((err) => {
     reportError('initBanner threw', err);
@@ -97,23 +91,12 @@ async function boot(): Promise<void> {
   // Content index + progress are independent and both small — load in
   // parallel so the first scene paint happens as soon as both settle.
   // Either failure mode (network, malformed JSON, missing key) is
-  // surfaced via reportError + an inline panel below. The fetch URL,
-  // status, and parsed shape are all logged via the boot strip so a
-  // "loaded 0 rooms" failure (no throw, just empty) is also visible.
+  // surfaced via reportError + an inline panel below.
   const indexUrlAbsolute = new URL('content/index.json', location.href).href;
-  bootLog(`fetch index: ${indexUrlAbsolute}`);
   let index: ContentIndex;
   try {
     const [loadedIndex] = await Promise.all([loadContentIndex(), loadProgress()]);
     index = loadedIndex;
-    const roomKeys = Object.keys(index.rooms);
-    const roomCounts = roomKeys.map((k) => `${k}:${index.rooms[k]?.length ?? 0}`).join(' ');
-    bootLog(
-      `index json: maxRoom=${index.maxRoom} roomKeys=[${roomKeys.join(',')}] roomCounts=[${roomCounts}]`,
-    );
-    if (index.maxRoom === 0 || roomKeys.length === 0) {
-      bootLog('WARNING rooms=0 — content/index.json parsed but EMPTY');
-    }
   } catch (err) {
     reportError('Failed to load content/index.json or progress', err);
     renderFatalPanel(gameEl, indexUrlAbsolute, err);
@@ -128,81 +111,11 @@ async function boot(): Promise<void> {
       registry: {
         rooms: roomsSceneMount,
         room: makeRoomSceneMount,
+        preview: makePreviewSceneMount,
         paint: makePaintSceneMount,
       },
     });
     scenes.start();
-    const sceneCount = document.querySelectorAll('.scene').length;
-    const tiles = document.querySelectorAll('.scene-rooms .room-cell').length;
-    bootLog(
-      `rooms scene mounted, tiles=${tiles} (.scene count=${sceneCount}, href=${location.href})`,
-    );
-    if (tiles === 0) {
-      bootLog('WARNING rooms scene mounted with 0 tiles');
-    }
-
-    // Post-mount layout probe. Reads computed sizes / rects of the
-    // key containers AFTER the next frame so layout has settled — if
-    // the room grid is visually blank despite tiles=100, this tells
-    // us whether the failure is:
-    //   • collapsed parent height (#game.h ≈ 0)
-    //   • collapsed scene (overflow / inset miscompute)
-    //   • zero-sized tiles (aspect-ratio not honored on this WebView)
-    //   • or none of the above (i.e. visibility / colour issue)
-    // Reads are coalesced into one rAF so a single forced reflow
-    // covers all of them.
-    requestAnimationFrame(() => {
-      try {
-        const gameRect = gameEl.getBoundingClientRect();
-        const sceneEl = document.querySelector('.scene') as HTMLElement | null;
-        const gridEl = document.querySelector('.rooms-grid') as HTMLElement | null;
-        const tileEl = document.querySelector('.room-cell') as HTMLElement | null;
-        const bannerVar = getComputedStyle(document.documentElement)
-          .getPropertyValue('--banner-h')
-          .trim();
-        const gameCS = getComputedStyle(gameEl);
-        bootLog(
-          `#game rect: x=${gameRect.x.toFixed(0)} y=${gameRect.y.toFixed(0)} ` +
-            `w=${gameRect.width.toFixed(0)} h=${gameRect.height.toFixed(0)} ` +
-            `cssH=${gameCS.height} ovf=${gameCS.overflow}`,
-        );
-        bootLog(`--banner-h resolved=${bannerVar || '(empty)'}`);
-        if (sceneEl) {
-          const sr = sceneEl.getBoundingClientRect();
-          const scs = getComputedStyle(sceneEl);
-          bootLog(
-            `.scene rect: x=${sr.x.toFixed(0)} y=${sr.y.toFixed(0)} ` +
-              `w=${sr.width.toFixed(0)} h=${sr.height.toFixed(0)} ` +
-              `padT=${scs.paddingTop} ovfY=${scs.overflowY}`,
-          );
-        } else {
-          bootLog('.scene element NOT FOUND in DOM');
-        }
-        if (gridEl) {
-          const gr = gridEl.getBoundingClientRect();
-          bootLog(
-            `.rooms-grid rect: x=${gr.x.toFixed(0)} y=${gr.y.toFixed(0)} ` +
-              `w=${gr.width.toFixed(0)} h=${gr.height.toFixed(0)}`,
-          );
-        } else {
-          bootLog('.rooms-grid element NOT FOUND in DOM');
-        }
-        if (tileEl) {
-          const tr = tileEl.getBoundingClientRect();
-          const tcs = getComputedStyle(tileEl);
-          bootLog(
-            `.room-cell[0] rect: x=${tr.x.toFixed(0)} y=${tr.y.toFixed(0)} ` +
-              `w=${tr.width.toFixed(0)} h=${tr.height.toFixed(0)} ` +
-              `bg=${tcs.backgroundColor} border=${tcs.borderColor} ` +
-              `aspectRatio=${tcs.aspectRatio || '(unset)'}`,
-          );
-        } else {
-          bootLog('.room-cell[0] NOT FOUND in DOM');
-        }
-      } catch (err) {
-        reportError('layout probe threw', err);
-      }
-    });
   } catch (err) {
     reportError('Scene manager / rooms-scene mount failed', err);
     renderFatalPanel(gameEl, 'rooms-scene mount', err);

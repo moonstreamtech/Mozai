@@ -1,10 +1,11 @@
 /*
  * Minimal scene manager.
  *
- * Three scenes, swapped inside #game:
- *   'rooms' — the room-select grid (entry point)
- *   'room'  — room-interior stub showing the room's picture ids
- *   'paint' — paint scene stub (real coloring engine lands later)
+ * Four scenes, swapped inside #game:
+ *   'rooms'   — the room-select grid (entry point)
+ *   'room'    — room-interior showing the room's pictures
+ *   'preview' — picture preview / cover screen with Start / View button
+ *   'paint'   — colour-by-number paint scene
  *
  * Why not a router library: the foundation is intentionally lean —
  * one container, one swap. A library would add an order of magnitude
@@ -21,7 +22,7 @@
 
 import type { ContentIndex, PuzzleMeta } from './content.js';
 
-export type SceneId = 'rooms' | 'room' | 'paint';
+export type SceneId = 'rooms' | 'room' | 'preview' | 'paint';
 
 /**
  * Each scene is asked to mount into a host element and returns a
@@ -40,6 +41,12 @@ export type SceneTeardown = () => void;
 export interface SceneContext {
   index: ContentIndex;
   push: (target: SceneTarget) => void;
+  /**
+   * Replace the current scene in history (no extra back step). Used
+   * by the preview interstitial so back from paint returns to the
+   * room rather than to the preview the user just dismissed.
+   */
+  replace: (target: SceneTarget) => void;
   /** Pop the current scene; no-op when at the root. */
   back: () => void;
   /** True iff a back action is possible (used to disable the back button at the root). */
@@ -51,6 +58,11 @@ export interface RoomTarget {
   scene: 'room';
   roomN: number;
 }
+/** Targets the preview / cover scene can be entered with. */
+export interface PreviewTarget {
+  scene: 'preview';
+  meta: PuzzleMeta;
+}
 /** Targets the paint scene can be entered with. */
 export interface PaintTarget {
   scene: 'paint';
@@ -60,11 +72,12 @@ export interface PaintTarget {
 export interface RoomsTarget {
   scene: 'rooms';
 }
-export type SceneTarget = RoomsTarget | RoomTarget | PaintTarget;
+export type SceneTarget = RoomsTarget | RoomTarget | PreviewTarget | PaintTarget;
 
 export interface SceneRegistry {
   rooms: SceneMount;
   room: (target: RoomTarget) => SceneMount;
+  preview: (target: PreviewTarget) => SceneMount;
   paint: (target: PaintTarget) => SceneMount;
 }
 
@@ -101,6 +114,19 @@ export class SceneManager {
     this.history.push(target);
   };
 
+  /**
+   * Drop the current target from history and mount a new one in its
+   * place — total history length is unchanged. Used by the preview
+   * → paint transition so back from paint returns to the room.
+   */
+  replace = (target: SceneTarget): void => {
+    this.teardownCurrent();
+    this.host.replaceChildren();
+    if (this.history.length > 0) this.history.pop();
+    this.mountTarget(target);
+    this.history.push(target);
+  };
+
   back = (): void => {
     if (this.history.length <= 1) return;
     this.teardownCurrent();
@@ -127,6 +153,7 @@ export class SceneManager {
     const ctx: SceneContext = {
       index: this.index,
       push: this.push,
+      replace: this.replace,
       back: this.back,
       canBack: this.canBack,
     };
@@ -139,6 +166,8 @@ export class SceneManager {
         return this.registry.rooms;
       case 'room':
         return this.registry.room(target);
+      case 'preview':
+        return this.registry.preview(target);
       case 'paint':
         return this.registry.paint(target);
     }

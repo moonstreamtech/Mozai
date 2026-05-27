@@ -70,6 +70,14 @@ export class PaintRenderer {
    */
   selectedColor = -1;
 
+  /**
+   * Optional minimap canvas. When set, every draw() also paints a
+   * scaled-down copy of the offscreen into this canvas with the
+   * current viewport rectangle overlaid. Cleared by setMinimap(null).
+   */
+  private minimap: HTMLCanvasElement | null = null;
+  private minimapCtx: CanvasRenderingContext2D | null = null;
+
   constructor(canvas: HTMLCanvasElement, state: PaintState) {
     this.canvas = canvas;
     this.state = state;
@@ -187,6 +195,48 @@ export class PaintRenderer {
   }
 
   /**
+   * Bind (or clear) a minimap canvas. The renderer paints into it
+   * on every frame: scaled offscreen + viewport rectangle overlay.
+   * Pass null to detach (the canvas stays in the DOM but is no
+   * longer updated). Caller is responsible for show/hide.
+   */
+  setMinimap(canvas: HTMLCanvasElement | null): void {
+    this.minimap = canvas;
+    this.minimapCtx = canvas ? canvas.getContext('2d') : null;
+    if (canvas) this.scheduleFrame();
+  }
+
+  /**
+   * Convert a minimap-local CSS coordinate to puzzle world cell
+   * coordinates. Returns null when the point falls outside the
+   * scaled puzzle area inside the minimap (e.g. letterboxing on
+   * non-square puzzles). Used by minimap tap-to-pan.
+   */
+  minimapToWorld(cssX: number, cssY: number): { worldX: number; worldY: number } | null {
+    const canvas = this.minimap;
+    if (!canvas) return null;
+    const dpr = window.devicePixelRatio || 1;
+    const bsW = canvas.width;
+    const bsH = canvas.height;
+    if (bsW === 0 || bsH === 0) return null;
+    const puzzleW = this.state.puzzle.w;
+    const puzzleH = this.state.puzzle.h;
+    const scale = Math.min(bsW / puzzleW, bsH / puzzleH);
+    const drawnW = puzzleW * scale;
+    const drawnH = puzzleH * scale;
+    const offX = (bsW - drawnW) / 2;
+    const offY = (bsH - drawnH) / 2;
+    const px = cssX * dpr;
+    const py = cssY * dpr;
+    if (px < offX || px > offX + drawnW) return null;
+    if (py < offY || py > offY + drawnH) return null;
+    return {
+      worldX: (px - offX) / scale,
+      worldY: (py - offY) / scale,
+    };
+  }
+
+  /**
    * Single-call render: one drawImage from offscreen at native
    * resolution into the visible canvas at the camera transform. The
    * compositor handles the scaling. We do clip to the visible
@@ -238,8 +288,58 @@ export class PaintRenderer {
     // of the selected colour are skipped — see the implementation).
     this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
 
-    this.framesPainted++;
+    this.drawMinimap();
+
     return true;
+  }
+
+  /**
+   * Paint the minimap (if set): scaled offscreen + viewport overlay
+   * rect. Cheap — the scale-down is a single drawImage and the rect
+   * is one strokeRect. Caller controls visibility (this paints
+   * unconditionally when a minimap canvas is bound).
+   */
+  private drawMinimap(): void {
+    const canvas = this.minimap;
+    const ctx = this.minimapCtx;
+    if (!canvas || !ctx) return;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (cssW === 0 || cssH === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    const bsW = Math.max(1, Math.round(cssW * dpr));
+    const bsH = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== bsW) canvas.width = bsW;
+    if (canvas.height !== bsH) canvas.height = bsH;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, bsW, bsH);
+
+    const puzzleW = this.state.puzzle.w;
+    const puzzleH = this.state.puzzle.h;
+    const scale = Math.min(bsW / puzzleW, bsH / puzzleH);
+    const drawnW = puzzleW * scale;
+    const drawnH = puzzleH * scale;
+    const offX = (bsW - drawnW) / 2;
+    const offY = (bsH - drawnH) / 2;
+
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.offscreen, offX, offY, drawnW, drawnH);
+
+    // Viewport rectangle: maps the visible cell range in the main
+    // canvas to the minimap. Clamped to the puzzle area so a
+    // wider-than-puzzle viewport (fit-zoom on a tall puzzle) still
+    // shows a sensible box.
+    const visibleW = this.canvas.clientWidth / this.camera.zoom;
+    const visibleH = this.canvas.clientHeight / this.camera.zoom;
+    const rx = offX + Math.max(0, this.camera.offsetX) * scale;
+    const ry = offY + Math.max(0, this.camera.offsetY) * scale;
+    const rw = Math.min(puzzleW - Math.max(0, this.camera.offsetX), visibleW) * scale;
+    const rh = Math.min(puzzleH - Math.max(0, this.camera.offsetY), visibleH) * scale;
+
+    ctx.strokeStyle = 'rgba(20, 30, 45, 0.9)';
+    ctx.lineWidth = Math.max(1, Math.round(dpr));
+    ctx.strokeRect(rx + 0.5, ry + 0.5, Math.max(0, rw - 1), Math.max(0, rh - 1));
   }
 
   /**
@@ -327,9 +427,6 @@ export class PaintRenderer {
     }
     ctx.stroke();
   }
-
-  /** Total frames the renderer has actually painted. Diagnostic. */
-  framesPainted = 0;
 
   /**
    * Faint per-cell outlines on UNFILLED paintable cells only, so the

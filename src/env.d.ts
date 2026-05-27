@@ -11,11 +11,6 @@ interface ImportMetaEnv {
    */
   readonly MOZAI_ADMOB_TESTING?: string;
   readonly MOZAI_DEBUG?: string;
-  /**
-   * Always-on boot diagnostics strip. Default OFF. Set to `1` to
-   * re-enable for a one-off device debug session.
-   */
-  readonly VITE_BOOT_DEBUG?: string;
 }
 
 interface ImportMeta {

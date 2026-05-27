@@ -26,7 +26,6 @@
  */
 
 import { loadPuzzle, type PuzzleMeta } from './content.js';
-import { diagLog } from './error-overlay.js';
 
 const DEFAULT_CONCURRENCY = 2;
 
@@ -62,13 +61,10 @@ export async function prefetchPuzzles(
         if (isCancelled()) return;
         ok++;
         onItem?.(true, meta);
-      } catch (err) {
+      } catch {
         if (isCancelled()) return;
         failed++;
         onItem?.(false, meta);
-        diagLog(
-          `prefetch ${meta.id} failed: ${(err as Error)?.message ?? String(err)}`,
-        );
       }
     }
   }

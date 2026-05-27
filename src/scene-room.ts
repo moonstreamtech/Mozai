@@ -39,7 +39,6 @@ import { loadFilledBitset } from './paint-state.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
 import { ContentResolveError } from './content.js';
 import { prefetchPuzzles } from './content-prefetch.js';
-import { diagLog } from './error-overlay.js';
 import { t } from './i18n.js';
 
 // Generous over-scan so a fast flick still finds the next tile painted.
@@ -119,7 +118,7 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         // this room into the cache so taps are instant and the room
         // works offline after this first visit. Runs concurrently
         // with the user browsing; doesn't block the silhouette grid.
-        startRoomPrefetch(body, target.roomN, pictures, () => cancelled);
+        startRoomPrefetch(body, pictures, () => cancelled);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -246,10 +245,11 @@ function buildPictureTile(ps: PictureState, thumb: Thumb, ctx: SceneContext): HT
   }
 
   tile.addEventListener('click', () => {
-    // Hand the meta straight through to the paint scene. It'll lazy-
-    // load the full puzzle JSON itself when the colouring engine
-    // resumes / starts.
-    ctx.push({ scene: 'paint', meta });
+    // Route through the preview scene — it shows the title +
+    // dimensions + palette dots + Start/View button before
+    // entering paint. The preview decides Start (silhouette) vs
+    // View (finished art) based on isCompleted.
+    ctx.push({ scene: 'preview', meta });
   });
 
   return tile;
@@ -295,12 +295,9 @@ function renderTileCanvas(tile: HTMLElement): void {
  * Kick off background prefetch of every puzzle JSON in the room.
  * Appends a small `↓ N/M` indicator to the scene body that updates
  * as each puzzle resolves and hides itself when the queue drains.
- * Diag at the end:
- *   prefetch room<N>: <count> puzzles, ok=<n> failed=<n>
  */
 function startRoomPrefetch(
   body: HTMLElement,
-  roomN: number,
   pictures: PuzzleMeta[],
   isCancelled: () => boolean,
 ): void {
@@ -322,10 +319,7 @@ function startRoomPrefetch(
       if (countEl) countEl.textContent = `${settled}/${total}`;
     },
   })
-    .then((result) => {
-      diagLog(
-        `prefetch room${roomN}: ${total} puzzles, ok=${result.ok} failed=${result.failed}`,
-      );
+    .then(() => {
       // Brief pause so the final "N/N" lands on screen, then fade
       // the indicator out. If the scene tore down in the meantime
       // the node is gone and we no-op.
@@ -336,10 +330,7 @@ function startRoomPrefetch(
         }, 600);
       }
     })
-    .catch((err) => {
-      diagLog(
-        `prefetch room${roomN}: threw ${(err as Error)?.message ?? err}`,
-      );
+    .catch(() => {
       if (status.isConnected) status.remove();
     });
 }
