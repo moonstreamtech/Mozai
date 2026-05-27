@@ -139,8 +139,11 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     };
     hintBtn.addEventListener('click', onHint);
 
-    const onZoomIn = () => input?.zoomCentered(1.4);
-    const onZoomOut = () => input?.zoomCentered(1 / 1.4);
+    // 1.25 step (not 1.4): smaller per-tap step gives the user a
+    // finer feel for the zoom, and lets ~6 taps span the full
+    // minZoom→maxZoom range on a typical puzzle (1.25^6 ≈ 3.8x).
+    const onZoomIn = () => input?.zoomCentered(1.25, 'plus');
+    const onZoomOut = () => input?.zoomCentered(1 / 1.25, 'minus');
     zoomInBtn.addEventListener('click', onZoomIn);
     zoomOutBtn.addEventListener('click', onZoomOut);
 
@@ -230,19 +233,19 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         });
 
         // Re-fit on container resize (banner height changes, rotation,
-        // keyboard) so the picture always fills the viewport sensibly.
-        // Also confirm-paint diagnostic: log canvas + viewport sizes
-        // on every fit so we can prove the first frame ran.
+        // keyboard) so the picture stays sensibly sized. We
+        // deliberately do NOT call resetCameraToFit() here — that
+        // would wipe the user's zoom and pan on every viewport
+        // resize. Instead, recompute the limits and just CLAMP the
+        // existing zoom into the new range, then clamp the pan
+        // offset so the puzzle stays on-screen.
         resizeObserver = new ResizeObserver(() => {
           if (!renderer) return;
-          // Preserve current zoom unless we'd fall below minZoom in
-          // the new viewport. Re-derive limits.
           const oldZoom = renderer.camera.zoom;
-          const newLimits = renderer.fitToScreen();
-          // If the user had zoomed in before, restore that.
-          if (oldZoom > newLimits.minZoom) {
-            renderer.camera.zoom = Math.min(oldZoom, newLimits.maxZoom);
-          }
+          const newLimits = renderer.computeFitLimits();
+          if (oldZoom < newLimits.minZoom) renderer.camera.zoom = newLimits.minZoom;
+          if (oldZoom > newLimits.maxZoom) renderer.camera.zoom = newLimits.maxZoom;
+          renderer.clampCamera();
           limits = newLimits;
           // Synchronous draw so the next frame paints with the new
           // size; scheduleFrame would defer to rAF, but the first
@@ -257,6 +260,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
               `viewport=${vRect?.width.toFixed(0) ?? '?'}x${vRect?.height.toFixed(0) ?? '?'} ` +
               `zoom=${renderer.camera.zoom.toFixed(2)} ` +
               `fitMin=${newLimits.minZoom.toFixed(2)} ` +
+              `fitMax=${newLimits.maxZoom.toFixed(2)} ` +
               `painted=${painted} frames=${renderer.framesPainted}`,
           );
           if (painted) {

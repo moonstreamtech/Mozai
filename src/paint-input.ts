@@ -21,6 +21,7 @@
 
 import type { PaintRenderer, CameraLimits } from './paint-render.js';
 import type { PaintState } from './paint-state.js';
+import { diagLog } from './error-overlay.js';
 
 export interface PaintInputDeps {
   canvas: HTMLCanvasElement;
@@ -167,7 +168,7 @@ export class PaintInput {
     const pos = this.getLocalPos(e);
     // Negative deltaY = scroll up = zoom in (matches Google Maps).
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    this.zoomAround(pos.x, pos.y, factor);
+    this.zoomAround(pos.x, pos.y, factor, 'wheel');
   }
 
   private beginPanZoom(): void {
@@ -188,41 +189,77 @@ export class PaintInput {
     const midX = (a.x + b.x) / 2;
     const midY = (a.y + b.y) / 2;
     const dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    // Pinch math: zoom scales linearly with the ratio of current to
+    // start finger distance. Fingers SPREADING (dist > startDist)
+    // → ratio > 1 → desiredZoom > startZoom → zoom IN. This is the
+    // standard "fingers spread = bigger" mental model. Anchored at
+    // the gesture midpoint via the world-coord pin below so the
+    // image scales about the fingers, not a corner.
     const desiredZoom = this.pinchStartZoom * (dist / this.pinchStartDist);
-    const limits = this.deps.limits();
-    const newZoom = clamp(desiredZoom, limits.minZoom, limits.maxZoom);
+    const newZoom = this.applyZoom(desiredZoom, 'pinch');
 
     // World coordinate that was under the gesture midpoint at start —
     // we keep it pinned under the moving midpoint as zoom changes.
     const worldX = this.panStartOffsetX + this.gestureStartMidX / this.pinchStartZoom;
     const worldY = this.panStartOffsetY + this.gestureStartMidY / this.pinchStartZoom;
-    this.deps.renderer.camera.zoom = newZoom;
     this.deps.renderer.camera.offsetX = worldX - midX / newZoom;
     this.deps.renderer.camera.offsetY = worldY - midY / newZoom;
+    this.deps.renderer.clampCamera();
     this.deps.renderer.scheduleFrame();
   }
 
   /**
    * Zoom around a screen point — used for wheel zoom and the +/- UI
    * buttons. Keeps the cell currently under the anchor stationary.
+   *
+   * `source` is one of 'pinch' | 'plus' | 'minus' | 'wheel' so the
+   * diag log makes it unambiguous which path triggered a given
+   * zoom change.
    */
-  zoomAround(screenX: number, screenY: number, factor: number): void {
+  zoomAround(screenX: number, screenY: number, factor: number, source: string): void {
     const cam = this.deps.renderer.camera;
-    const limits = this.deps.limits();
-    const newZoom = clamp(cam.zoom * factor, limits.minZoom, limits.maxZoom);
-    if (newZoom === cam.zoom) return;
-    const worldX = cam.offsetX + screenX / cam.zoom;
-    const worldY = cam.offsetY + screenY / cam.zoom;
-    cam.zoom = newZoom;
+    const oldZoom = cam.zoom;
+    const desired = oldZoom * factor;
+    const worldX = cam.offsetX + screenX / oldZoom;
+    const worldY = cam.offsetY + screenY / oldZoom;
+    const newZoom = this.applyZoom(desired, source);
+    if (newZoom === oldZoom) return;
     cam.offsetX = worldX - screenX / newZoom;
     cam.offsetY = worldY - screenY / newZoom;
+    this.deps.renderer.clampCamera();
     this.deps.renderer.scheduleFrame();
   }
 
   /** Centre-anchored zoom (for the +/- UI buttons). */
-  zoomCentered(factor: number): void {
+  zoomCentered(factor: number, source: 'plus' | 'minus'): void {
     const r = this.deps.canvas.getBoundingClientRect();
-    this.zoomAround(r.width / 2, r.height / 2, factor);
+    this.zoomAround(r.width / 2, r.height / 2, factor, source);
+  }
+
+  /**
+   * Single chokepoint for changing camera.zoom. Clamps to the
+   * current limits and emits a diag line so direction + clamping
+   * is verifiable on device. Returns the (clamped) new zoom.
+   *
+   * Every zoom-change path (pinch, +, −, wheel) MUST go through
+   * here — the previous bug was a hardcoded maxZoom < fitZoom in
+   * the renderer which made clamp() collapse to a binary toggle.
+   * Routing through one helper keeps the assertion and the log in
+   * one place.
+   */
+  private applyZoom(desired: number, source: string): number {
+    const cam = this.deps.renderer.camera;
+    const limits = this.deps.limits();
+    const oldZoom = cam.zoom;
+    let clamped = desired;
+    if (clamped < limits.minZoom) clamped = limits.minZoom;
+    if (clamped > limits.maxZoom) clamped = limits.maxZoom;
+    cam.zoom = clamped;
+    diagLog(
+      `zoom set: from=${oldZoom.toFixed(3)} to=${clamped.toFixed(3)} ` +
+        `min=${limits.minZoom.toFixed(3)} max=${limits.maxZoom.toFixed(3)} source=${source}`,
+    );
+    return clamped;
   }
 
   private attemptCellAt(screenX: number, screenY: number): void {
@@ -238,8 +275,4 @@ export class PaintInput {
       this.deps.onCellFilled(cell, colorIdx, result.completed);
     }
   }
-}
-
-function clamp(v: number, lo: number, hi: number): number {
-  return v < lo ? lo : v > hi ? hi : v;
 }

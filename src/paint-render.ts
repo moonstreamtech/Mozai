@@ -274,39 +274,88 @@ export class PaintRenderer {
   }
 
   /**
-   * Pick a sensible initial camera so the whole puzzle just fits the
-   * visible canvas with a small margin. CONTAIN fit: scale =
-   * min(viewportW / imgW, viewportH / imgH), so the picture fills
-   * its limiting axis edge-to-edge (width when the puzzle is square
-   * or wider than the viewport's aspect, height when taller). The
-   * resulting fitZoom is also the MIN ZOOM — the user can pinch in
-   * but not out past full visibility on the limiting axis.
+   * Compute the zoom limits for the current canvas + puzzle WITHOUT
+   * mutating the camera. fitToScreen() calls this; the scene's
+   * ResizeObserver also calls it on viewport changes so the user's
+   * zoom and pan are preserved across resizes (the old fitToScreen()
+   * destructively reset camera.zoom and offsetX/Y on every call,
+   * which wiped the user's view on palette-empty / keyboard /
+   * rotation events).
    *
-   * marginCss=8 keeps the picture a hair off the very edges of the
-   * viewport so it doesn't visually touch the topbar / palette
-   * borders. Set to 0 if true edge-to-edge is preferred later.
+   * minZoom = fit (CONTAIN). The user cannot zoom out past full
+   * visibility on the limiting axis.
    *
-   * Returns false (no-op) when the canvas hasn't been laid out yet
-   * (clientWidth/Height === 0). The caller is expected to call
-   * fitToScreen again from a ResizeObserver once layout settles.
+   * maxZoom = max(fitZoom * 4, 96). At least 4x the fit so a tiny
+   * puzzle still has meaningful zoom-in headroom; at least 96 CSS
+   * px per cell so a huge grid like the 1000x1000 perf-test
+   * remains comfortably tappable when fully zoomed in. The
+   * fitZoom*4 floor is the actual fix for the user-reported
+   * "+ toggles" bug: the old hardcoded maxZoom of 48 was BELOW
+   * fitZoom for any puzzle that comfortably fits the viewport, so
+   * clamp(v, fitZoom, 48) collapsed to one of two values
+   * (fitZoom or 48) depending on whether v was above or below
+   * fitZoom — a binary toggle, exactly the symptom.
    */
-  fitToScreen(marginCss = 8): CameraLimits {
+  computeFitLimits(marginCss = 8): CameraLimits {
     const cssW = Math.max(1, this.canvas.clientWidth - marginCss * 2);
     const cssH = Math.max(1, this.canvas.clientHeight - marginCss * 2);
     const zX = cssW / this.state.puzzle.w;
     const zY = cssH / this.state.puzzle.h;
     const fitZoom = Math.min(zX, zY);
-    this.camera.zoom = fitZoom;
-    // Centre the puzzle inside the viewport.
-    const visibleCellsW = this.canvas.clientWidth / fitZoom;
-    const visibleCellsH = this.canvas.clientHeight / fitZoom;
+    const maxZoom = Math.max(fitZoom * 4, 96);
+    return { minZoom: fitZoom, maxZoom };
+  }
+
+  /**
+   * Reset camera to "fit, centred". Called explicitly on scene
+   * mount; NOT called from the resize observer (so the user's
+   * zoom/pan survive layout changes).
+   */
+  resetCameraToFit(marginCss = 8): CameraLimits {
+    const limits = this.computeFitLimits(marginCss);
+    this.camera.zoom = limits.minZoom;
+    const visibleCellsW = this.canvas.clientWidth / limits.minZoom;
+    const visibleCellsH = this.canvas.clientHeight / limits.minZoom;
     this.camera.offsetX = (this.state.puzzle.w - visibleCellsW) / 2;
     this.camera.offsetY = (this.state.puzzle.h - visibleCellsH) / 2;
     this.scheduleFrame();
-    // Limits: minZoom = fitZoom locks the zoom-OUT floor at fit, so
-    // the user cannot zoom past "fully visible on the limiting
-    // axis". maxZoom ~48 CSS px per cell is comfortably tappable.
-    return { minZoom: fitZoom, maxZoom: 48 };
+    return limits;
+  }
+
+  /**
+   * Backwards-compatible alias. New code should call either
+   * computeFitLimits (just-the-numbers) or resetCameraToFit
+   * (also reset). Kept here so existing call sites don't break.
+   */
+  fitToScreen(marginCss = 8): CameraLimits {
+    return this.resetCameraToFit(marginCss);
+  }
+
+  /**
+   * Clamp camera offset so the puzzle is never dragged completely
+   * off-screen. When the puzzle is smaller than the viewport on an
+   * axis (zoom near or below fit), centre it on that axis.
+   * Otherwise allow panning up to but not past the puzzle's edge
+   * — equivalent to "no empty void next to the puzzle on any side".
+   */
+  clampCamera(): void {
+    const cssW = this.canvas.clientWidth;
+    const cssH = this.canvas.clientHeight;
+    if (cssW === 0 || cssH === 0) return;
+    const visibleW = cssW / this.camera.zoom;
+    const visibleH = cssH / this.camera.zoom;
+    const puzzleW = this.state.puzzle.w;
+    const puzzleH = this.state.puzzle.h;
+    if (visibleW >= puzzleW) {
+      this.camera.offsetX = (puzzleW - visibleW) / 2;
+    } else {
+      this.camera.offsetX = clamp(this.camera.offsetX, 0, puzzleW - visibleW);
+    }
+    if (visibleH >= puzzleH) {
+      this.camera.offsetY = (puzzleH - visibleH) / 2;
+    } else {
+      this.camera.offsetY = clamp(this.camera.offsetY, 0, puzzleH - visibleH);
+    }
   }
 
   /**
@@ -367,4 +416,14 @@ function parsePalette(palette: string[]): Uint8ClampedArray {
     out[i * 4 + 3] = a;
   }
   return out;
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  // Defensive: if lo > hi the input is malformed; return lo. The
+  // CameraLimits constructor in computeFitLimits guarantees
+  // maxZoom > minZoom (maxZoom = max(fitZoom * 4, 96) >= fitZoom),
+  // so this should never hit in practice — it's just a safety
+  // net against future refactors.
+  if (lo > hi) return lo;
+  return v < lo ? lo : v > hi ? hi : v;
 }

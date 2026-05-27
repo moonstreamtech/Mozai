@@ -630,18 +630,22 @@ body {
   overflow: hidden;
   background: var(--scene-bg);
   /*
-   * Banner reservation. #game's height already excludes --banner-h,
-   * but on devices where the actual native AdMob banner is taller
-   * than our reserved --banner-h (e.g. tablets where banners are
-   * 90dp vs our 80dp default before bannerSize event resolves),
-   * #game's bottom extends INTO the banner and the palette ends
-   * up behind it. Adding env(safe-area-inset-bottom) here as
-   * padding-bottom buys a small floor of gesture-nav clearance
-   * without doubling --banner-h (which would leave a visible gap
-   * in the common case). The palette / Hint / completion chrome
-   * therefore stay tappable above the banner.
+   * Definitive banner reservation. Earlier attempts (safe-area-only
+   * padding, palette min-height) did not push the palette above the
+   * native AdMob banner: the banner overlays the WebView, sits
+   * ABOVE the safe area, and is invisible to web layout. Now we
+   * reserve real bottom space equal to --banner-h plus an
+   * additional safe-area inset (--banner-h already includes the
+   * inset when set by banner.ts, so this is intentional belt-and-
+   * braces against an underestimated --banner-h on tablets where
+   * adaptive banners can reach 90dp+). The flex layout shrinks
+   * .paint-viewport by exactly this padding, so the canvas
+   * viewport height is now:
+   *   #game.height − .paint-topbar − .paint-palette − banner-reservation
+   * which keeps the palette + Hint + zoom controls fully tappable
+   * above the ad.
    */
-  padding: 0 0 env(safe-area-inset-bottom, 0px) 0;
+  padding: 0 0 calc(var(--banner-h) + env(safe-area-inset-bottom, 0px)) 0;
 }
 
 .paint-topbar {
