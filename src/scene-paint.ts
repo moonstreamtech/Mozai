@@ -49,7 +49,11 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     root.className = 'scene scene-paint';
     root.innerHTML = `
       <header class="paint-topbar">
-        <button class="back-btn" type="button" aria-label="Back to room">←</button>
+        <button class="back-btn" type="button" aria-label="Back to room">
+          <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
         <div class="paint-title-block">
           <span class="paint-title">${meta.id}</span>
           <span class="paint-progress-label" data-overall-pct>0%</span>
@@ -239,8 +243,20 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         // resize. Instead, recompute the limits and just CLAMP the
         // existing zoom into the new range, then clamp the pan
         // offset so the puzzle stays on-screen.
+        //
+        // When the puzzle is COMPLETE we additionally freeze the
+        // camera entirely: even a sub-pixel viewport reflow (e.g.
+        // 100% → "✓ Done" topbar text width change, palette swatch
+        // removal vs the min-height pin, banner-h late refinement)
+        // would otherwise re-clamp the camera and translate the
+        // finished image by a few pixels. The "image still shifts
+        // slightly downward on completion" symptom traces here.
         resizeObserver = new ResizeObserver(() => {
           if (!renderer) return;
+          if (state && state.isComplete()) {
+            renderer.draw();
+            return;
+          }
           const oldZoom = renderer.camera.zoom;
           const newLimits = renderer.computeFitLimits();
           if (oldZoom < newLimits.minZoom) renderer.camera.zoom = newLimits.minZoom;

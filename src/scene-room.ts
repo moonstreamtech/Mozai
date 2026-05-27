@@ -51,7 +51,11 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     root.className = 'scene scene-room';
     root.innerHTML = `
       <header class="scene-header">
-        <button class="back-btn" type="button" aria-label="Back to rooms">←</button>
+        <button class="back-btn" type="button" aria-label="Back to rooms">
+          <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
         <h1 class="scene-title">Room ${target.roomN}</h1>
         <span class="scene-spacer" aria-hidden="true"></span>
       </header>

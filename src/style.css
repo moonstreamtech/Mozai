@@ -419,19 +419,41 @@ body {
 }
 
 .back-btn {
+  /*
+   * Flex-center the SVG icon so the chevron sits at the exact
+   * centre of the round button. The previous unicode "←" glyph
+   * inherited the host font's line-box and rendered visibly
+   * below centre on most Android system fonts. SVG with
+   * stroke-width 3 + stroke-linecap round also makes the arrow
+   * much bolder than the thin unicode form.
+   */
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 44px;
   height: 44px;
   border-radius: 22px;
   border: 1px solid var(--scene-border);
   background: var(--scene-bg);
-  color: var(--scene-ink);
-  font-size: 20px;
+  /* Dark navy — stronger contrast than the previous --scene-ink
+     (which is the same value, but explicit here so a future
+     palette tweak doesn't dim the back button). */
+  color: #1a232e;
   cursor: pointer;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .back-btn:active {
   background: var(--scene-locked-bg);
+}
+
+.back-icon {
+  /* 20×20 inside a 44×44 button leaves a 12 px ring around the
+     chevron — visually balanced. */
+  width: 20px;
+  height: 20px;
+  display: block;
 }
 
 .scene-note {
@@ -800,17 +822,18 @@ body {
   scrollbar-width: thin;
   /*
    * Reserve the strip's full height even after every swatch has been
-   * removed (at 100% completion). Without this min-height, removing
-   * the last swatch collapses the palette from ~70 px to ~21 px,
-   * which lets .paint-viewport (flex:1 1 auto) grow by ~50 px, the
-   * ResizeObserver re-fits the canvas, and the finished picture
-   * visibly shifts down by ~25 px at the moment of completion.
-   * Empirical full-palette content height with the current swatch
-   * design (36 px dot + 10 px label + 10 px gap + 10 px padding both
-   * sides) is ~70 px; min-height pins us there so the viewport stays
-   * stable across the completion transition.
+   * removed (at 100% completion). Without this, the .paint-viewport
+   * grows by exactly this much and the renderer re-centres lower.
+   * The natural full-palette content height is:
+   *   .swatch-dot 36 + .swatch internal gap 4 + .swatch-pct ~12
+   *   + .swatch padding (4+4) = 60 px
+   *   + .paint-palette padding (10+10) = 20 px
+   *   + border-top 1 px
+   *   = 81 px
+   * Pin to 82 (1 px headroom against any rounding) so swatch
+   * removal at completion does not change the strip's box.
    */
-  min-height: 70px;
+  min-height: 82px;
 }
 
 .swatch {
