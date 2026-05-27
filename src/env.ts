@@ -43,6 +43,26 @@ export const ADMOB_TEST_BANNER_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/6300978
 // test id does NOT work for rewarded format.
 export const ADMOB_TEST_REWARDED_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/5224354917`;
 
+/**
+ * Live CDN base for puzzle content that isn't bundled with the APK
+ * (rooms 2+). The folder layout mirrors the app's local
+ * `public/content/` 1:1, so any path under `roomN/...` on the CDN
+ * resolves to the same `roomN/...` the bundled version would have
+ * shipped.
+ *
+ *   https://moonstreamtech.com/mozai-content/roomN/<id>.json
+ *   https://moonstreamtech.com/mozai-content/roomN/thumbs.json
+ *
+ * There is NO `index.json` on the CDN — `index.json` is always read
+ * from the bundled assets so the boot path needs zero network. See
+ * src/content-resolver.ts for the bundled-vs-cache-vs-network
+ * resolution.
+ *
+ * Trailing slash is required for the joinUrl() in the resolver to
+ * produce clean absolute URLs.
+ */
+export const CDN_BASE = 'https://moonstreamtech.com/mozai-content/';
+
 type Mode = 'REAL' | 'TEST';
 
 export interface AdMobConfig {

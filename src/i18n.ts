@@ -417,6 +417,59 @@ const STRINGS_COMPLETE_FINISHED: LangMap = {
   ca: 'Has acabat {name}.',
 };
 
+const STRINGS_NEEDS_INTERNET: LangMap = {
+  en: 'Internet needed to load this room (first time only).',
+  es: 'Se necesita internet para cargar esta sala (solo la primera vez).',
+  fr: 'Internet requis pour charger cette salle (première fois seulement).',
+  de: 'Internet erforderlich, um diesen Raum zu laden (nur beim ersten Mal).',
+  it: 'Serve internet per caricare questa stanza (solo la prima volta).',
+  pt: 'É necessária internet para carregar esta sala (apenas da primeira vez).',
+  'pt-BR': 'É necessária internet para carregar esta sala (apenas na primeira vez).',
+  ru: 'Для загрузки этого зала нужен интернет (только в первый раз).',
+  uk: 'Потрібен інтернет, щоб завантажити цю кімнату (лише вперше).',
+  pl: 'Do wczytania tego pokoju potrzebny jest internet (tylko za pierwszym razem).',
+  cs: 'K načtení této místnosti je potřeba internet (jen poprvé).',
+  sk: 'Na načítanie tejto miestnosti je potrebný internet (len prvýkrát).',
+  ro: 'Este nevoie de internet pentru a încărca această cameră (doar prima dată).',
+  hu: 'Internet szükséges a szoba betöltéséhez (csak először).',
+  bg: 'Нужен е интернет за зареждане на тази стая (само първия път).',
+  hr: 'Za učitavanje ove sobe potreban je internet (samo prvi put).',
+  sr: 'За учитавање ове собе потребан је интернет (само први пут).',
+  sl: 'Za nalaganje te sobe je potreben internet (le prvič).',
+  nl: 'Internet nodig om deze kamer te laden (alleen de eerste keer).',
+  sv: 'Internet behövs för att ladda detta rum (bara första gången).',
+  da: 'Der kræves internet for at indlæse dette rum (kun første gang).',
+  nb: 'Internett kreves for å laste dette rommet (kun første gang).',
+  fi: 'Internet tarvitaan tämän huoneen lataamiseen (vain ensimmäisellä kerralla).',
+  el: 'Απαιτείται internet για τη φόρτωση αυτού του δωματίου (μόνο την πρώτη φορά).',
+  tr: 'Bu odayı yüklemek için internet gerekli (yalnızca ilk seferinde).',
+  ja: 'このルームの読み込みにはインターネットが必要です（初回のみ）。',
+  ko: '이 룸을 불러오려면 인터넷이 필요합니다 (처음 한 번만).',
+  'zh-CN': '加载此房间需要联网（仅首次）。',
+  'zh-TW': '載入此房間需要連線（僅首次）。',
+  ar: 'يلزم اتصال بالإنترنت لتحميل هذه الغرفة (للمرة الأولى فقط).',
+  he: 'נדרשת אינטרנט כדי לטעון את החדר הזה (רק בפעם הראשונה).',
+  fa: 'برای بارگذاری این اتاق به اینترنت نیاز است (فقط بار اول).',
+  ur: 'یہ کمرہ لوڈ کرنے کے لیے انٹرنیٹ درکار ہے (صرف پہلی بار).',
+  hi: 'इस कमरे को लोड करने के लिए इंटरनेट चाहिए (केवल पहली बार)।',
+  bn: 'এই কক্ষ লোড করতে ইন্টারনেট প্রয়োজন (শুধু প্রথমবার)।',
+  ta: 'இந்த அறையை ஏற்ற இணையம் தேவை (முதல் முறை மட்டும்).',
+  te: 'ఈ గదిని లోడ్ చేయడానికి ఇంటర్నెట్ అవసరం (మొదటిసారి మాత్రమే).',
+  mr: 'ही खोली लोड करण्यासाठी इंटरनेट आवश्यक आहे (फक्त पहिल्यांदा).',
+  ml: 'ഈ മുറി ലോഡ് ചെയ്യാൻ ഇന്റർനെറ്റ് വേണം (ആദ്യതവണ മാത്രം).',
+  gu: 'આ ઓરડો લોડ કરવા માટે ઇન્ટરનેટ જરૂરી છે (માત્ર પ્રથમ વખત).',
+  kn: 'ಈ ಕೋಣೆ ಲೋಡ್ ಮಾಡಲು ಇಂಟರ್ನೆಟ್ ಬೇಕು (ಮೊದಲ ಬಾರಿ ಮಾತ್ರ).',
+  pa: 'ਇਹ ਕਮਰਾ ਲੋਡ ਕਰਨ ਲਈ ਇੰਟਰਨੈੱਟ ਚਾਹੀਦਾ ਹੈ (ਸਿਰਫ਼ ਪਹਿਲੀ ਵਾਰ).',
+  id: 'Diperlukan internet untuk memuat ruang ini (hanya pertama kali).',
+  ms: 'Internet diperlukan untuk memuatkan bilik ini (kali pertama sahaja).',
+  vi: 'Cần kết nối internet để tải phòng này (chỉ lần đầu).',
+  th: 'ต้องใช้อินเทอร์เน็ตเพื่อโหลดห้องนี้ (เฉพาะครั้งแรก).',
+  fil: 'Kailangan ng internet para i-load ang kuwartong ito (unang beses lang).',
+  sw: 'Mtandao unahitajika kupakia chumba hiki (mara ya kwanza tu).',
+  af: 'Internet word benodig om hierdie kamer te laai (slegs die eerste keer).',
+  ca: 'Cal internet per carregar aquesta sala (només la primera vegada).',
+};
+
 const STRINGS_DONE_BADGE: LangMap = {
   en: '✓ Done', es: '✓ Listo', fr: '✓ OK', de: '✓ Fertig', it: '✓ Fatto',
   pt: '✓ Concluído', 'pt-BR': '✓ Concluído',
@@ -438,7 +491,8 @@ const STRINGS_DONE_BADGE: LangMap = {
 type StringKey =
   | 'room' | 'chooseRoom' | 'loadingPictures' | 'loadingPuzzle'
   | 'noPicturesYet' | 'couldNotLoadThumbs' | 'couldNotLoadPuzzle' | 'retry'
-  | 'hint' | 'hinted' | 'done' | 'completeTitle' | 'completeFinished' | 'doneBadge';
+  | 'hint' | 'hinted' | 'done' | 'completeTitle' | 'completeFinished' | 'doneBadge'
+  | 'needsInternet';
 
 const TABLE: Record<StringKey, LangMap> = {
   room: STRINGS_ROOM,
@@ -455,6 +509,7 @@ const TABLE: Record<StringKey, LangMap> = {
   completeTitle: STRINGS_COMPLETE_TITLE,
   completeFinished: STRINGS_COMPLETE_FINISHED,
   doneBadge: STRINGS_DONE_BADGE,
+  needsInternet: STRINGS_NEEDS_INTERNET,
 };
 
 export const lang: Lang = detectLang();

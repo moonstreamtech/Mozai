@@ -36,6 +36,7 @@ import type { RoomTarget, SceneContext, SceneMount } from './scenes.js';
 import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle, type ThumbMode } from './thumbs.js';
+import { ContentResolveError } from './content.js';
 import { t } from './i18n.js';
 
 // Generous over-scan so a fast flick still finds the next tile painted.
@@ -90,9 +91,17 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] thumbs load failed', err);
+        // Distinguish "offline + uncached" (show needs-internet) from
+        // a real data error (show the generic couldNotLoad). Both
+        // get the same Retry button — the resolver will try the
+        // network again on a fresh attempt.
+        const message =
+          err instanceof ContentResolveError
+            ? t('needsInternet')
+            : t('couldNotLoadThumbs', { n: target.roomN });
         body.innerHTML = `
           <p class="scene-note scene-error">
-            ${t('couldNotLoadThumbs', { n: target.roomN })}<br>
+            ${message}<br>
             <button class="cta-btn" type="button" data-retry>${t('retry')}</button>
           </p>`;
         body.querySelector<HTMLButtonElement>('[data-retry]')?.addEventListener('click', () => {

@@ -2,18 +2,23 @@
  * Content loader.
  *
  * Reads `content/index.json` (built by scripts/build-content-index.mjs)
- * at app start. The index is intentionally LIGHTWEIGHT — just per-puzzle
- * metadata, not the cell data. Full puzzle JSONs are fetched lazily by
- * `loadPuzzle(id)` only when a picture is opened in the paint scene.
+ * at app start, and individual puzzle JSONs on demand. Both go
+ * through src/content-resolver.ts which picks bundled vs cache vs
+ * network:
+ *   - index.json is ALWAYS bundled (boot has no network dependency)
+ *   - room1/* is ALWAYS bundled (entry-point room plays offline)
+ *   - room2+/*  is cache-first, then CDN, then a localized "needs
+ *     internet" fallback at the scene layer
  *
- * Both fetches are served from `public/content/` which Vite copies
- * verbatim into the build output and Capacitor packages into
- * `android/app/src/main/assets/public/`. On native the `fetch()` call
- * resolves against the local file URL the WebView is served from, so
- * there is no network round-trip.
+ * `ContentResolveError` is thrown when the resolver returns
+ * source='FAILED'. The scene-room / scene-paint catch blocks check
+ * for this specific error class and render the i18n "needsInternet"
+ * panel + a Retry button, rather than the generic "could not load"
+ * message.
  */
 
 import { bootLog } from './error-overlay.js';
+import { resolveContent } from './content-resolver.js';
 
 export interface PuzzleMeta {
   id: string;
@@ -44,65 +49,68 @@ export interface Puzzle {
 }
 
 /**
- * Fetch the content index. Resolves base-relative so the same call
- * works in `npm run dev`, in `vite preview`, and inside the
- * Capacitor WebView (where the page lives at e.g.
- * `https://localhost/index.html`).
- *
- * Error messages include the attempted URL so the on-screen fatal
- * panel can show the developer exactly what the WebView tried to
- * fetch — "content/index.json fetch failed: 404" is far more
- * useful than a bare TypeError on device.
+ * Thrown when the resolver could not produce content for a path
+ * (cache miss + network failure for rooms 2+, or a missing bundled
+ * file for room 1 / index.json). Scenes catch this specifically
+ * and render the i18n "needsInternet" panel; any other error is a
+ * parse / data bug surfaced via the existing couldNotLoad strings.
+ */
+export class ContentResolveError extends Error {
+  readonly path: string;
+  constructor(path: string) {
+    super(`Content unavailable: ${path}`);
+    this.name = 'ContentResolveError';
+    this.path = path;
+  }
+}
+
+/**
+ * Fetch the content index. ALWAYS bundled — never fetched from the
+ * CDN — so the home screen renders on a cold boot with no network.
  */
 export async function loadContentIndex(): Promise<ContentIndex> {
-  const url = 'content/index.json';
-  let res: Response;
-  try {
-    res = await fetch(url, { cache: 'no-store' });
-  } catch (err) {
-    throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
-  }
-  bootLog(`index status: ${res.status} (url=${res.url})`);
-  if (!res.ok) {
-    throw new Error(`fetch('${url}') status ${res.status}`);
+  const path = 'content/index.json';
+  const result = await resolveContent(path);
+  bootLog(`index ${path}: source=${result.source}`);
+  if (result.source === 'FAILED') {
+    throw new ContentResolveError(path);
   }
   let data: ContentIndex;
   try {
-    data = (await res.json()) as ContentIndex;
+    data = JSON.parse(result.text) as ContentIndex;
   } catch (err) {
-    throw new Error(`fetch('${url}') parse failed — ${(err as Error)?.message ?? err}`);
+    throw new Error(`${path} parse failed — ${(err as Error)?.message ?? err}`);
   }
-  // Defensive: an empty / malformed index is a content pipeline bug.
-  // Surface it loudly here rather than silently rendering an empty
-  // room grid that looks like "the user has no progress".
+  // Defensive: an empty / malformed index is a content-pipeline bug.
   if (!data || typeof data.maxRoom !== 'number' || !data.rooms) {
-    throw new Error(`fetch('${url}') returned malformed payload`);
+    throw new Error(`${path} returned malformed payload`);
   }
   return data;
 }
 
 /**
- * Fetch a single full puzzle JSON. Cached per id so re-opening the
- * same picture during a session doesn't re-hit storage. Sized for
- * lazy use by the paint scene — NOT called during the room-select
- * boot path.
+ * Fetch a single full puzzle JSON. In-memory cache per id so
+ * re-opening the same picture during a session doesn't re-hit
+ * storage. Underlying read is bundled (room1) or
+ * cache-then-network (rooms 2+) via resolveContent. Throws
+ * ContentResolveError when offline + uncached.
  */
 const puzzleCache = new Map<string, Puzzle>();
 
 export async function loadPuzzle(meta: PuzzleMeta): Promise<Puzzle> {
   const cached = puzzleCache.get(meta.id);
   if (cached) return cached;
-  const url = `content/room${meta.room}/${meta.id}.json`;
-  let res: Response;
+  const path = `content/room${meta.room}/${meta.id}.json`;
+  const result = await resolveContent(path);
+  if (result.source === 'FAILED') {
+    throw new ContentResolveError(path);
+  }
+  let puzzle: Puzzle;
   try {
-    res = await fetch(url, { cache: 'no-store' });
+    puzzle = JSON.parse(result.text) as Puzzle;
   } catch (err) {
-    throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
+    throw new Error(`${path} parse failed — ${(err as Error)?.message ?? err}`);
   }
-  if (!res.ok) {
-    throw new Error(`fetch('${url}') status ${res.status}`);
-  }
-  const puzzle = (await res.json()) as Puzzle;
   puzzleCache.set(meta.id, puzzle);
   return puzzle;
 }

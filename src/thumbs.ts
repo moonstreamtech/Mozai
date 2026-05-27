@@ -18,6 +18,9 @@
  * the caller has chosen (typically CSS width × dpr).
  */
 
+import { resolveContent } from './content-resolver.js';
+import { ContentResolveError } from './content.js';
+
 export interface Thumb {
   w: number;
   h: number;
@@ -38,25 +41,25 @@ const bundleCache = new Map<number, Promise<ThumbBundle>>();
 export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const cached = bundleCache.get(roomN);
   if (cached) return cached;
-  const url = `content/room${roomN}/thumbs.json`;
-  // Error messages include the attempted URL so the room-interior
-  // scene's error tile can show the developer exactly what the
-  // WebView tried to fetch.
-  const p = fetch(url, { cache: 'no-store' })
-    .catch((err) => {
-      throw new Error(`fetch('${url}') threw — ${(err as Error)?.message ?? err}`);
-    })
-    .then(async (res) => {
-      if (!res.ok) {
-        throw new Error(`fetch('${url}') status ${res.status}`);
+  const path = `content/room${roomN}/thumbs.json`;
+  // Route through the bundled-vs-cache-vs-network resolver. Room 1's
+  // thumbs are bundled; rooms 2+ are cache-first / CDN-fallback.
+  // The resolver returns source='FAILED' for offline + uncached,
+  // which we surface as ContentResolveError so the scene shows the
+  // localized "needs internet" panel.
+  // A rejected promise is EVICTED from bundleCache so a retry from
+  // the scene actually re-runs the resolver.
+  const p = resolveContent(path)
+    .then((result) => {
+      if (result.source === 'FAILED') {
+        throw new ContentResolveError(path);
       }
-      const data = (await res.json()) as ThumbBundle;
-      return data;
+      return JSON.parse(result.text) as ThumbBundle;
+    })
+    .catch((err) => {
+      bundleCache.delete(roomN);
+      throw err;
     });
-  // Cache the promise (not the resolved value) so concurrent loaders
-  // don't race. A rejected promise stays in the cache so retries
-  // happen via an explicit cache eviction (none for now — fetch errors
-  // are surfaced and the scene shows an error tile).
   bundleCache.set(roomN, p);
   return p;
 }

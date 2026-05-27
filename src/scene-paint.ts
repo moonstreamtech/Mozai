@@ -31,7 +31,7 @@
  */
 
 import type { PaintTarget, SceneContext, SceneMount } from './scenes.js';
-import { loadPuzzle } from './content.js';
+import { ContentResolveError, loadPuzzle } from './content.js';
 import { markCompleted } from './progress.js';
 import { PaintState } from './paint-state.js';
 import { PaintRenderer, type CameraLimits } from './paint-render.js';
@@ -390,8 +390,23 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] loadPuzzle failed', err);
-        loadingEl.textContent = t('couldNotLoadPuzzle', { id: pictureTitle(meta) });
+        // Offline + uncached → needs-internet panel with a Retry
+        // button that re-enters the same paint scene (which
+        // re-runs the resolver). Other errors get the generic
+        // "could not load <title>" message but still offer Retry.
+        const isOffline = err instanceof ContentResolveError;
+        const message = isOffline
+          ? t('needsInternet')
+          : t('couldNotLoadPuzzle', { id: pictureTitle(meta) });
+        loadingEl.innerHTML = `
+          ${message}<br>
+          <button class="cta-btn" type="button" data-paint-retry>${t('retry')}</button>
+        `;
         loadingEl.classList.add('scene-error');
+        loadingEl.querySelector<HTMLButtonElement>('[data-paint-retry]')?.addEventListener(
+          'click',
+          () => ctx.push({ scene: 'paint', meta }),
+        );
       });
 
     // ----- helpers -----
