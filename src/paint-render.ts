@@ -177,6 +177,19 @@ export class PaintRenderer {
    * Returns true if a frame was actually painted (canvas had a real
    * size); false otherwise. Callers can use this to schedule a
    * retry once layout has settled.
+   *
+   * Layer order (bottom → top):
+   *   1. White background.
+   *   2. Gridline outlines on UNFILLED paintable cells only.
+   *   3. Offscreen blit (palette colours for filled cells).
+   *
+   * The gridlines sit UNDER the palette colours so a filled cell
+   * shows its true palette colour with no edge tint. Previously the
+   * lines were stroked on top, which made every filled cell's
+   * outline ~12% darker than its interior — the "stuck highlight"
+   * the user reported on the last-tapped cell (it was actually
+   * present on every filled cell; the contiguous painted region
+   * just made it most visible at the boundary).
    */
   draw(): boolean {
     const { ctx, canvas, camera } = this;
@@ -189,8 +202,6 @@ export class PaintRenderer {
     if (canvas.width !== bsW) canvas.width = bsW;
     if (canvas.height !== bsH) canvas.height = bsH;
 
-    // White background (for unfilled cells that are transparent in
-    // the offscreen).
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, bsW, bsH);
 
@@ -201,9 +212,10 @@ export class PaintRenderer {
     const dstY = -camera.offsetY * pxPerCell;
     const dstW = this.state.puzzle.w * pxPerCell;
     const dstH = this.state.puzzle.h * pxPerCell;
-    ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
 
     this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
+    ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
+
     this.framesPainted++;
     return true;
   }
@@ -212,11 +224,18 @@ export class PaintRenderer {
   framesPainted = 0;
 
   /**
-   * Faint per-cell gridlines so unpainted cells are visible to tap.
-   * Skipped when cells are too small (~< 4 backing px per cell) to
-   * avoid a solid-grey wash at extreme zoom-out on huge grids.
-   * Lines are drawn in CSS-pixel-scaled coordinates (.5 offset to
-   * keep 1-device-pixel strokes crisp).
+   * Faint per-cell outlines on UNFILLED paintable cells only, so the
+   * player can see the discrete cells to tap. Drawn BEFORE the
+   * offscreen blit (see draw()) so filled cells' palette colours
+   * paint over the lines — finished cells show pure palette colour
+   * with no edge tint. Background cells (-1) are also skipped: they
+   * aren't paintable so showing them as a tappable grid would
+   * mislead.
+   *
+   * Skipped entirely when cells are too small (< 4 backing px per
+   * cell) to avoid a solid-grey wash at extreme zoom-out on huge
+   * grids. Per-cell rect outlines keep the JS work bounded by the
+   * VISIBLE cell count, not the puzzle size.
    */
   private drawGridlines(bsW: number, bsH: number, pxPerCell: number, dstX: number, dstY: number): void {
     if (pxPerCell < 4) return;
@@ -224,9 +243,6 @@ export class PaintRenderer {
     const dpr = window.devicePixelRatio || 1;
     const puzzleW = state.puzzle.w;
     const puzzleH = state.puzzle.h;
-    // Visible cell range — only stroke lines that intersect the
-    // canvas viewport. Adding +1 on both ends ensures the edge
-    // lines on the boundary cells are included.
     const cellsAcross = bsW / pxPerCell;
     const cellsDown = bsH / pxPerCell;
     const cx0 = Math.max(0, Math.floor(camera.offsetX));
@@ -234,24 +250,25 @@ export class PaintRenderer {
     const cy0 = Math.max(0, Math.floor(camera.offsetY));
     const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
 
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.12)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
     ctx.lineWidth = Math.max(1, Math.round(dpr));
     ctx.beginPath();
-    // Vertical lines.
-    for (let cx = cx0; cx <= cx1; cx++) {
-      const px = Math.round(dstX + cx * pxPerCell) + 0.5;
-      const yStart = Math.max(0, Math.round(dstY));
-      const yEnd = Math.min(bsH, Math.round(dstY + puzzleH * pxPerCell));
-      ctx.moveTo(px, yStart);
-      ctx.lineTo(px, yEnd);
-    }
-    // Horizontal lines.
-    for (let cy = cy0; cy <= cy1; cy++) {
+    const psz = Math.max(1, Math.round(pxPerCell) - 1);
+    for (let cy = cy0; cy < cy1; cy++) {
       const py = Math.round(dstY + cy * pxPerCell) + 0.5;
-      const xStart = Math.max(0, Math.round(dstX));
-      const xEnd = Math.min(bsW, Math.round(dstX + puzzleW * pxPerCell));
-      ctx.moveTo(xStart, py);
-      ctx.lineTo(xEnd, py);
+      const rowBase = cy * puzzleW;
+      for (let cx = cx0; cx < cx1; cx++) {
+        const i = rowBase + cx;
+        if (state.solution[i] < 0) continue;       // background — never paintable
+        if (state.filled[i]) continue;             // already painted — covered by blit
+        const px = Math.round(dstX + cx * pxPerCell) + 0.5;
+        // Single rect path per cell — batched into one stroke().
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + psz, py);
+        ctx.lineTo(px + psz, py + psz);
+        ctx.lineTo(px, py + psz);
+        ctx.closePath();
+      }
     }
     ctx.stroke();
   }

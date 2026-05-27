@@ -284,8 +284,15 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         loadFinished = true;
         const finalSnap = state.snapshot();
         if (finalSnap.complete) {
-          // Resume of an already-completed picture — show the modal.
-          onPuzzleCompleted('resume-already-complete');
+          // Resume of an already-completed picture: show the finished
+          // art, NOT the completion modal. The modal is a celebration
+          // for the moment of finishing — popping it every time the
+          // user opens a completed picture would cover the artwork
+          // they came to look at. updateOverall() below renders a
+          // "✓ Done" label in the topbar so the completion state is
+          // still visible without obscuring the canvas.
+          // (selectedColor stays -1; no swatch to pre-select on a
+          // fully done picture.)
         } else {
           const first = firstAvailableColor();
           if (first >= 0) selectColor(first);
@@ -360,8 +367,12 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     function updateOverall(): void {
       if (!state) return;
       const s = state.snapshot();
-      const pct = s.paintableCount > 0 ? Math.round((s.filledCount / s.paintableCount) * 100) : 100;
-      overallPctEl.textContent = `${pct}%`;
+      const pct = s.paintableCount > 0 ? Math.round((s.filledCount / s.paintableCount) * 100) : 0;
+      // Render "✓ Done" instead of "100%" on a completed picture so
+      // the user opening an already-finished puzzle sees a clear
+      // completion indicator in the topbar without the modal
+      // covering the canvas.
+      overallPctEl.textContent = s.complete ? '✓ Done' : `${pct}%`;
     }
 
     function updateHintBtn(): void {
