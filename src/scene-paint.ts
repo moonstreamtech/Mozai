@@ -178,22 +178,37 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       if (selectedColor < 0) return;
       // Capture which colour the user requested the hint for AT
       // TAP TIME — if the ad takes a few seconds and the user
-      // changes selection mid-wait, the reward must reveal what
+      // changes selection mid-wait, the reward must apply to what
       // they originally asked for.
       const colorForHint = selectedColor;
       hintBtn.disabled = true;
-      // Locale-neutral wait indicator on the hint button (the ad is
-      // preparing, not the puzzle). One ellipsis instead of a
-      // translated word keeps the button width stable across
-      // languages.
       hintBtn.textContent = '💡 …';
       showRewarded()
         .then((granted) => {
           if (cancelled || !state || !renderer) return;
-          if (granted) {
-            state.revealHint(colorForHint);
-            renderer.updateHintReveal(colorForHint);
+          if (!granted) return;
+          // New hint behaviour (replaces the old grey-tint reveal):
+          // auto-fill every unpainted cell of the selected colour.
+          // The player gets the colour completed in one go in
+          // exchange for a rewarded ad. Selection outlines for
+          // that colour vanish naturally on the next draw because
+          // every cell now has filled === 1.
+          const filledN = autoFillColor(state, renderer, colorForHint);
+          diagLog(`hint autoFill: color=${colorForHint} cellsFilled=${filledN}`);
+          if (filledN > 0) {
+            updatePalette();
+            updateOverall();
             scheduleSave();
+            // The colour is now (almost certainly) at 100%; drop
+            // its swatch and clear selection — same path the
+            // last-cell-filled flow uses.
+            const s = state.snapshot();
+            if (s.colorFilled[colorForHint] >= s.colorTotal[colorForHint]) {
+              maybeDropSwatch(colorForHint);
+            }
+            if (s.complete && loadFinished) {
+              onPuzzleCompleted('cell-filled');
+            }
           }
         })
         .finally(() => {
@@ -417,6 +432,9 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
 
     function selectColor(idx: number): void {
       selectedColor = idx;
+      // Notify the renderer so the inset selection outlines redraw.
+      // setSelectedColor is a no-op when the index hasn't changed.
+      renderer?.setSelectedColor(idx);
       paletteEl.querySelectorAll('.swatch').forEach((el) => {
         const swatchIdx = Number((el as HTMLElement).dataset.idx);
         el.classList.toggle('is-selected', swatchIdx === idx);
@@ -593,6 +611,37 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       root.remove();
     };
   };
+}
+
+/**
+ * Auto-fill every unpainted cell whose target is `colorIdx`.
+ * Returns the count of cells actually filled.
+ *
+ * Used by the new Hint flow: spending a rewarded-ad reward instantly
+ * completes the selected colour. We collect the indices into a
+ * single array then ask the renderer to do one batched offscreen
+ * upload — for a 1000×1000 puzzle's ~200k colour-matching cells
+ * this is the difference between a frozen 200k putImageData calls
+ * and a single full-buffer upload.
+ *
+ * attemptFill is called per cell so per-colour counters and the
+ * filledCount totals stay in sync with the persistence layer.
+ */
+function autoFillColor(
+  state: PaintState,
+  renderer: PaintRenderer,
+  colorIdx: number,
+): number {
+  const { solution, filled } = state;
+  const newlyFilled: number[] = [];
+  for (let i = 0; i < solution.length; i++) {
+    if (solution[i] !== colorIdx) continue;
+    if (filled[i]) continue;
+    const result = state.attemptFill(i, colorIdx);
+    if (result.changed) newlyFilled.push(i);
+  }
+  renderer.bulkUpdateCellsFilled(newlyFilled);
+  return newlyFilled.length;
 }
 
 function doBack(ctx: SceneContext): void {

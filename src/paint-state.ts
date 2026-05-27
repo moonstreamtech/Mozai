@@ -345,3 +345,54 @@ function base64ToBytes(b64: string): Uint8Array {
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
 }
+
+/**
+ * Lightweight read of just the painted-cell bitset for a given
+ * picture id. Used by the room-interior scene to render
+ * grayscale-of-real-color thumbnails (painted cells = real palette
+ * colour, unpainted = grayscale) without having to instantiate a
+ * full PaintState per picture (which would also load the puzzle
+ * JSON over the network for rooms 2+ — far too expensive when the
+ * room screen needs to scan a dozen tiles).
+ *
+ * Returns null when:
+ *   - no saved state exists for this id (never opened, or never
+ *     painted a single cell)
+ *   - the saved format version doesn't match
+ *   - the saved dimensions don't match `expectedSize` (a schema
+ *     drift case; safer to ignore than to render with the wrong
+ *     mapping)
+ *   - any IO / parse error
+ * Callers treat null as "no painted cells" and render the thumb
+ * fully grayscale.
+ */
+export async function loadFilledBitset(
+  id: string,
+  expectedSize: number,
+): Promise<Uint8Array | null> {
+  try {
+    const { value } = await Preferences.get({ key: STORAGE_KEY_PREFIX + id });
+    if (!value) return null;
+    const env = JSON.parse(value) as PersistEnvelope;
+    if (env.v !== CURRENT_FORMAT_VERSION) return null;
+    if (env.w * env.h !== expectedSize) return null;
+    let rleB64: string | undefined;
+    if (env.kind === 'inline') {
+      rleB64 = env.rle;
+    } else if (env.kind === 'fs' && env.fsPath) {
+      const read = await Filesystem.readFile({
+        path: env.fsPath,
+        directory: Directory.Data,
+        encoding: Encoding.UTF8,
+      });
+      rleB64 = typeof read.data === 'string' ? read.data : undefined;
+    }
+    if (!rleB64) return null;
+    const rleBytes = base64ToBytes(rleB64);
+    const filled = new Uint8Array(expectedSize);
+    rleDecodeInto(rleBytes, filled);
+    return filled;
+  } catch {
+    return null;
+  }
+}

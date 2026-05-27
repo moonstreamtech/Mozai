@@ -35,7 +35,8 @@
 import type { RoomTarget, SceneContext, SceneMount } from './scenes.js';
 import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
-import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle, type ThumbMode } from './thumbs.js';
+import { loadFilledBitset } from './paint-state.js';
+import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
 import { ContentResolveError } from './content.js';
 import { prefetchPuzzles } from './content-prefetch.js';
 import { diagLog } from './error-overlay.js';
@@ -45,9 +46,16 @@ import { t } from './i18n.js';
 // 400 px ahead/behind the viewport is ~4 grid rows on a typical phone.
 const VIEWPORT_OVER_SCAN = '400px';
 
+interface TilePayload {
+  thumb: Thumb;
+  meta: PuzzleMeta;
+  completed: boolean;
+  filled: Uint8Array | null;
+}
+
 // Per-tile thumb payload. WeakMap so removing a tile from the DOM
 // releases the thumb reference for GC without manual bookkeeping.
-const thumbForTile = new WeakMap<HTMLElement, { thumb: Thumb; mode: ThumbMode }>();
+const thumbForTile = new WeakMap<HTMLElement, TilePayload>();
 
 export function makeRoomSceneMount(target: RoomTarget): SceneMount {
   return (host, ctx) => {
@@ -84,10 +92,29 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     let cancelled = false;
     let intersectionObserver: IntersectionObserver | null = null;
 
-    loadRoomThumbs(target.roomN)
-      .then((bundle) => {
+    // Load thumbs + every picture's painted-state bitset in
+    // parallel. Each tile's grayscale-of-real-color preview needs
+    // BOTH — the thumb palette/cells AND that picture's saved
+    // filled bitset — so we wait for both before rendering. The
+    // bitset loads are cheap (RLE-decoded Uint8Array from
+    // Preferences); per-picture loadFilledBitset returns null
+    // when no saved state exists (never-opened pictures render
+    // fully grayscale).
+    Promise.all([
+      loadRoomThumbs(target.roomN),
+      Promise.all(
+        pictures.map(async (meta) => {
+          if (isCompleted(meta.id)) {
+            return { meta, completed: true, filled: null as Uint8Array | null };
+          }
+          const filled = await loadFilledBitset(meta.id, meta.w * meta.h);
+          return { meta, completed: false, filled };
+        }),
+      ),
+    ])
+      .then(([bundle, pictureStates]) => {
         if (cancelled) return;
-        intersectionObserver = renderGrid(body, pictures, bundle, ctx);
+        intersectionObserver = renderGrid(body, pictureStates, bundle, ctx);
         // Background prefetch — kick off downloading every puzzle in
         // this room into the cache so taps are instant and the room
         // works offline after this first visit. Runs concurrently
@@ -126,15 +153,21 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
   };
 }
 
+interface PictureState {
+  meta: PuzzleMeta;
+  completed: boolean;
+  filled: Uint8Array | null;
+}
+
 function renderGrid(
   host: HTMLElement,
-  pictures: PuzzleMeta[],
+  states: PictureState[],
   bundle: ThumbBundle,
   ctx: SceneContext,
 ): IntersectionObserver | null {
   host.innerHTML = '';
 
-  if (pictures.length === 0) {
+  if (states.length === 0) {
     const empty = document.createElement('p');
     empty.className = 'scene-note';
     empty.textContent = t('noPicturesYet');
@@ -167,16 +200,16 @@ function renderGrid(
     },
   );
 
-  for (const meta of pictures) {
-    const thumb = bundle[meta.id];
+  for (const ps of states) {
+    const thumb = bundle[ps.meta.id];
     if (!thumb) {
       // A meta entry without a matching thumb means the prebuild was
       // out-of-sync with the committed thumbs.json. Render an empty
       // tile rather than crashing the whole room.
-      grid.appendChild(buildErrorTile(meta.id));
+      grid.appendChild(buildErrorTile(ps.meta.id));
       continue;
     }
-    const tile = buildPictureTile(meta, thumb, ctx);
+    const tile = buildPictureTile(ps, thumb, ctx);
     grid.appendChild(tile);
     io.observe(tile);
   }
@@ -184,21 +217,25 @@ function renderGrid(
   return io;
 }
 
-function buildPictureTile(meta: PuzzleMeta, thumb: Thumb, ctx: SceneContext): HTMLButtonElement {
-  const completed = isCompleted(meta.id);
+function buildPictureTile(ps: PictureState, thumb: Thumb, ctx: SceneContext): HTMLButtonElement {
+  const { meta, completed, filled } = ps;
   const tile = document.createElement('button');
   tile.type = 'button';
   tile.className = 'picture-tile' + (completed ? ' is-completed' : '');
   tile.setAttribute('role', 'listitem');
-  tile.setAttribute(
-    'aria-label',
-    completed ? `${meta.id}, completed` : `${meta.id}, silhouette`,
-  );
+  // aria-label reflects the new tri-state preview semantics: full
+  // colour, partial progress, or grayscale-only.
+  const ariaState = completed
+    ? 'completed'
+    : filled
+      ? 'in progress'
+      : 'not started';
+  tile.setAttribute('aria-label', `${meta.id}, ${ariaState}`);
 
   const canvas = document.createElement('canvas');
   canvas.className = 'picture-canvas';
   tile.appendChild(canvas);
-  thumbForTile.set(tile, { thumb, mode: completed ? 'color' : 'silhouette' });
+  thumbForTile.set(tile, { thumb, meta, completed, filled });
 
   if (completed) {
     const check = document.createElement('span');
@@ -210,7 +247,8 @@ function buildPictureTile(meta: PuzzleMeta, thumb: Thumb, ctx: SceneContext): HT
 
   tile.addEventListener('click', () => {
     // Hand the meta straight through to the paint scene. It'll lazy-
-    // load the full puzzle JSON itself when the colouring engine lands.
+    // load the full puzzle JSON itself when the colouring engine
+    // resumes / starts.
     ctx.push({ scene: 'paint', meta });
   });
 
@@ -245,7 +283,12 @@ function renderTileCanvas(tile: HTMLElement): void {
   const h = Math.max(1, Math.round(rect.height * dpr));
   canvas.width = w;
   canvas.height = h;
-  renderThumb(canvas, payload.thumb, payload.mode);
+  renderThumb(canvas, payload.thumb, {
+    completed: payload.completed,
+    filled: payload.filled,
+    sourceW: payload.meta.w,
+    sourceH: payload.meta.h,
+  });
 }
 
 /**

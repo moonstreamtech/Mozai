@@ -62,6 +62,14 @@ export class PaintRenderer {
 
   camera: Camera = { offsetX: 0, offsetY: 0, zoom: 1 };
 
+  /**
+   * Currently selected palette index, or -1 for none. Drives the
+   * inner-border "this colour goes here" overlay drawn in
+   * drawSelectionOutlines(). Use setSelectedColor() to mutate —
+   * direct assignment won't schedule a redraw.
+   */
+  selectedColor = -1;
+
   constructor(canvas: HTMLCanvasElement, state: PaintState) {
     this.canvas = canvas;
     this.state = state;
@@ -160,6 +168,43 @@ export class PaintRenderer {
   }
 
   /** Re-render after a viewport / camera change. */
+  /**
+   * Change the selected colour and schedule a redraw if it actually
+   * changed. Pass -1 to clear the selection (no outlines drawn).
+   */
+  setSelectedColor(idx: number): void {
+    if (this.selectedColor === idx) return;
+    this.selectedColor = idx;
+    this.scheduleFrame();
+  }
+
+  /**
+   * Batch-update a list of cells that just got filled (e.g. from a
+   * hint auto-fill). Writes the palette RGBA straight into the
+   * offscreen ImageData buffer and uploads it via a SINGLE
+   * putImageData of the whole offscreen — many cheaper than
+   * one putImageData per cell when the list is large (a 1000×1000
+   * hint can fill 200k cells). One scheduleFrame at the end.
+   */
+  bulkUpdateCellsFilled(indices: number[]): void {
+    if (indices.length === 0) return;
+    const { state, offscreenData, paletteRgba } = this;
+    const data = offscreenData.data;
+    for (let k = 0; k < indices.length; k++) {
+      const i = indices[k];
+      const v = state.solution[i];
+      if (v < 0) continue;
+      const p = i * 4;
+      const pp = v * 4;
+      data[p] = paletteRgba[pp];
+      data[p + 1] = paletteRgba[pp + 1];
+      data[p + 2] = paletteRgba[pp + 2];
+      data[p + 3] = paletteRgba[pp + 3];
+    }
+    this.offscreenCtx.putImageData(offscreenData, 0, 0);
+    this.scheduleFrame();
+  }
+
   scheduleFrame(): void {
     if (this.rafId !== 0) return;
     this.rafId = requestAnimationFrame(() => {
@@ -215,9 +260,89 @@ export class PaintRenderer {
 
     this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
+    // Selection overlay sits ABOVE the palette colours — it must
+    // remain visible on painted cells too (well, no, painted cells
+    // of the selected colour are skipped — see the implementation).
+    this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
 
     this.framesPainted++;
     return true;
+  }
+
+  /**
+   * Selection guide. For every cell whose target colour matches
+   * `this.selectedColor` AND that is NOT yet painted, stroke an
+   * INSET square outline in the selected palette colour just
+   * inside the cell's outer edge. The cell interior stays blank —
+   * only the outline appears.
+   *
+   * Performance:
+   *   - Skipped entirely when no colour is selected (-1).
+   *   - Skipped at extreme zoom-out (pxPerCell < ~8 device px) —
+   *     1M outlines on a 1000×1000 grid would be an unreadable
+   *     wash anyway, and would dominate the frame.
+   *   - Iterates only the VISIBLE cell range, not the whole grid.
+   *   - One ctx.beginPath() / ctx.stroke() pair for the entire
+   *     overlay; up to thousands of rect paths batched into a
+   *     single stroke call.
+   *
+   * On a 1000×1000 puzzle fully zoomed-in this iterates roughly
+   * the viewport's worth of cells (typically <2k), well under a
+   * frame budget. Zoomed-out hits the skip threshold first.
+   */
+  private drawSelectionOutlines(
+    bsW: number,
+    bsH: number,
+    pxPerCell: number,
+    dstX: number,
+    dstY: number,
+  ): void {
+    const sel = this.selectedColor;
+    if (sel < 0) return;
+    if (pxPerCell < 8) return;
+    const { ctx, state } = this;
+    const palettePos = sel * 4;
+    if (palettePos < 0 || palettePos + 3 >= this.paletteRgba.length) return;
+    const pr = this.paletteRgba[palettePos];
+    const pg = this.paletteRgba[palettePos + 1];
+    const pb = this.paletteRgba[palettePos + 2];
+
+    const puzzleW = state.puzzle.w;
+    const puzzleH = state.puzzle.h;
+    const cellsAcross = bsW / pxPerCell;
+    const cellsDown = bsH / pxPerCell;
+    const cx0 = Math.max(0, Math.floor(this.camera.offsetX));
+    const cx1 = Math.min(puzzleW, Math.ceil(this.camera.offsetX + cellsAcross) + 1);
+    const cy0 = Math.max(0, Math.floor(this.camera.offsetY));
+    const cy1 = Math.min(puzzleH, Math.ceil(this.camera.offsetY + cellsDown) + 1);
+
+    const dpr = window.devicePixelRatio || 1;
+    // Inset so the outline reads as a "second inner frame" sitting
+    // inside the cell, not overlapping the gridline at the cell
+    // boundary. Scales with cell size.
+    const inset = Math.max(2, Math.round(pxPerCell * 0.18));
+    const innerSize = Math.max(1, Math.round(pxPerCell) - inset * 2);
+    if (innerSize <= 0) return;
+
+    ctx.strokeStyle = `rgba(${pr}, ${pg}, ${pb}, 0.95)`;
+    ctx.lineWidth = Math.max(2, Math.round(dpr * 1.5));
+    ctx.beginPath();
+    for (let cy = cy0; cy < cy1; cy++) {
+      const py = Math.round(dstY + cy * pxPerCell) + inset + 0.5;
+      const rowBase = cy * puzzleW;
+      for (let cx = cx0; cx < cx1; cx++) {
+        const i = rowBase + cx;
+        if (state.solution[i] !== sel) continue;
+        if (state.filled[i]) continue;
+        const px = Math.round(dstX + cx * pxPerCell) + inset + 0.5;
+        ctx.moveTo(px, py);
+        ctx.lineTo(px + innerSize, py);
+        ctx.lineTo(px + innerSize, py + innerSize);
+        ctx.lineTo(px, py + innerSize);
+        ctx.closePath();
+      }
+    }
+    ctx.stroke();
   }
 
   /** Total frames the renderer has actually painted. Diagnostic. */
