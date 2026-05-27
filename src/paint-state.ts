@@ -79,12 +79,28 @@ interface PersistEnvelope {
   h: number;
 }
 
+export interface PaintableBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
 export class PaintState {
   readonly puzzle: Puzzle;
   readonly solution: Int16Array;
   readonly filled: Uint8Array;
   readonly colorTotal: Uint32Array;
   readonly colorFilled: Uint32Array;
+  /**
+   * Tight bounding box of paintable (non-background) cells, in cell
+   * coordinates. Used by the renderer's fit-to-screen so puzzles
+   * whose silhouette doesn't fill the whole grid (e.g. a heart in
+   * the upper rows of a 10×10) still appear centred in the viewport.
+   * Inclusive on both ends: maxX is the rightmost paintable column
+   * INDEX. Null for the degenerate all-background case.
+   */
+  readonly paintableBounds: PaintableBounds | null;
   private readonly paintableCount: number;
   private filledCount = 0;
   readonly hintRevealed = new Set<number>();
@@ -100,7 +116,13 @@ export class PaintState {
     this.colorTotal = new Uint32Array(puzzle.palette.length);
     this.colorFilled = new Uint32Array(puzzle.palette.length);
 
+    // Single pass: build solution + per-colour totals + the paintable
+    // bounding box. ~1M iterations on a 1000×1000 puzzle, ~5 ms.
     let paintable = 0;
+    let minX = puzzle.w;
+    let minY = puzzle.h;
+    let maxX = -1;
+    let maxY = -1;
     for (let i = 0; i < n; i++) {
       const v = puzzle.cells[i];
       if (v < 0) {
@@ -109,9 +131,16 @@ export class PaintState {
         this.solution[i] = v;
         paintable++;
         this.colorTotal[v]++;
+        const x = i % puzzle.w;
+        const y = (i - x) / puzzle.w;
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
       }
     }
     this.paintableCount = paintable;
+    this.paintableBounds = maxX < minX || maxY < minY ? null : { minX, minY, maxX, maxY };
   }
 
   /** Attempt to paint cell `i` with `colorIdx`. */

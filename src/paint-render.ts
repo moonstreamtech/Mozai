@@ -272,9 +272,9 @@ export class PaintRenderer {
   /**
    * Selection guide. For every cell whose target colour matches
    * `this.selectedColor` AND that is NOT yet painted, stroke an
-   * INSET square outline in the selected palette colour just
-   * inside the cell's outer edge. The cell interior stays blank —
-   * only the outline appears.
+   * outline FLUSH WITH THE CELL'S OUTER EDGE in the selected
+   * palette colour. Visually the cell's gray gridline border just
+   * turns the selected colour — no inset, no floating box.
    *
    * Performance:
    *   - Skipped entirely when no colour is selected (-1).
@@ -317,28 +317,31 @@ export class PaintRenderer {
     const cy1 = Math.min(puzzleH, Math.ceil(this.camera.offsetY + cellsDown) + 1);
 
     const dpr = window.devicePixelRatio || 1;
-    // Inset so the outline reads as a "second inner frame" sitting
-    // inside the cell, not overlapping the gridline at the cell
-    // boundary. Scales with cell size.
-    const inset = Math.max(2, Math.round(pxPerCell * 0.18));
-    const innerSize = Math.max(1, Math.round(pxPerCell) - inset * 2);
-    if (innerSize <= 0) return;
+    // Thin, flush. Same lineWidth as the gridlines themselves
+    // (Math.max(1, round(dpr))) so the outline is exactly the
+    // grid border in a different colour — no thicker frame.
+    ctx.strokeStyle = `rgb(${pr}, ${pg}, ${pb})`;
+    ctx.lineWidth = Math.max(1, Math.round(dpr));
 
-    ctx.strokeStyle = `rgba(${pr}, ${pg}, ${pb}, 0.95)`;
-    ctx.lineWidth = Math.max(2, Math.round(dpr * 1.5));
     ctx.beginPath();
     for (let cy = cy0; cy < cy1; cy++) {
-      const py = Math.round(dstY + cy * pxPerCell) + inset + 0.5;
+      // Cell top edge is at world y = cy → screen y; bottom edge at
+      // y = cy + 1. .5 offset keeps the 1-device-px stroke on a
+      // single pixel row instead of straddling two (which would
+      // render blurry / half-transparent on every device).
+      const top = Math.round(dstY + cy * pxPerCell) + 0.5;
+      const bottom = Math.round(dstY + (cy + 1) * pxPerCell) + 0.5;
       const rowBase = cy * puzzleW;
       for (let cx = cx0; cx < cx1; cx++) {
         const i = rowBase + cx;
         if (state.solution[i] !== sel) continue;
         if (state.filled[i]) continue;
-        const px = Math.round(dstX + cx * pxPerCell) + inset + 0.5;
-        ctx.moveTo(px, py);
-        ctx.lineTo(px + innerSize, py);
-        ctx.lineTo(px + innerSize, py + innerSize);
-        ctx.lineTo(px, py + innerSize);
+        const left = Math.round(dstX + cx * pxPerCell) + 0.5;
+        const right = Math.round(dstX + (cx + 1) * pxPerCell) + 0.5;
+        ctx.moveTo(left, top);
+        ctx.lineTo(right, top);
+        ctx.lineTo(right, bottom);
+        ctx.lineTo(left, bottom);
         ctx.closePath();
       }
     }
@@ -441,8 +444,21 @@ export class PaintRenderer {
     this.camera.zoom = limits.minZoom;
     const visibleCellsW = this.canvas.clientWidth / limits.minZoom;
     const visibleCellsH = this.canvas.clientHeight / limits.minZoom;
-    this.camera.offsetX = (this.state.puzzle.w - visibleCellsW) / 2;
-    this.camera.offsetY = (this.state.puzzle.h - visibleCellsH) / 2;
+    // Centre the PAINTABLE bounding box in the viewport (not the
+    // whole grid). Puzzles whose silhouette only fills part of the
+    // grid — e.g. a heart in rows 0-7 of a 10×10 — would otherwise
+    // appear visually off-centre because the empty grid rows are
+    // indistinguishable from the canvas background. Falls back to
+    // grid centre for the degenerate all-background case.
+    const b = this.state.paintableBounds;
+    const w = this.state.puzzle.w;
+    const h = this.state.puzzle.h;
+    // +1 because the bounds are inclusive cell indices and a cell
+    // spans [i, i+1] in world coordinates.
+    const centreX = b ? (b.minX + b.maxX + 1) / 2 : w / 2;
+    const centreY = b ? (b.minY + b.maxY + 1) / 2 : h / 2;
+    this.camera.offsetX = centreX - visibleCellsW / 2;
+    this.camera.offsetY = centreY - visibleCellsH / 2;
     this.scheduleFrame();
     return limits;
   }
