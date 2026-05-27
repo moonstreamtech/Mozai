@@ -38,6 +38,7 @@ import { PaintRenderer, type CameraLimits } from './paint-render.js';
 import { PaintInput } from './paint-input.js';
 import { showRewarded } from './rewarded.js';
 import { diagLog } from './error-overlay.js';
+import { t } from './i18n.js';
 
 const SAVE_DEBOUNCE_MS = 400;
 
@@ -68,7 +69,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         <div class="paint-completion-card">
           <h2>Complete!</h2>
           <p>You finished <strong>${meta.id}</strong>.</p>
-          <button class="cta-btn" type="button" data-back-after-complete>Back to room</button>
+          <button class="cta-btn" type="button" data-dismiss-complete>${t('done')}</button>
         </div>
       </div>
     `;
@@ -83,7 +84,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     const completionEl = root.querySelector<HTMLDivElement>('[data-completion]')!;
     const zoomInBtn = root.querySelector<HTMLButtonElement>('[data-zoom-in]')!;
     const zoomOutBtn = root.querySelector<HTMLButtonElement>('[data-zoom-out]')!;
-    const completionBackBtn = root.querySelector<HTMLButtonElement>('[data-back-after-complete]')!;
+    const completionDismissBtn = root.querySelector<HTMLButtonElement>('[data-dismiss-complete]')!;
 
     let state: PaintState | null = null;
     let renderer: PaintRenderer | null = null;
@@ -104,7 +105,14 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
 
     const onBack = () => doBack(ctx);
     back.addEventListener('click', onBack);
-    completionBackBtn.addEventListener('click', onBack);
+    // "Done" / "Tamam" button: DISMISS the modal and stay on the
+    // finished picture so the user can keep viewing their artwork.
+    // Navigation back to the room is done via the back arrow /
+    // hardware back, not by auto-navigation here.
+    const onDismissComplete = () => {
+      completionEl.hidden = true;
+    };
+    completionDismissBtn.addEventListener('click', onDismissComplete);
 
     const onHint = () => {
       if (selectedColor < 0) return;
@@ -470,7 +478,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     return () => {
       cancelled = true;
       back.removeEventListener('click', onBack);
-      completionBackBtn.removeEventListener('click', onBack);
+      completionDismissBtn.removeEventListener('click', onDismissComplete);
       hintBtn.removeEventListener('click', onHint);
       zoomInBtn.removeEventListener('click', onZoomIn);
       zoomOutBtn.removeEventListener('click', onZoomOut);
