@@ -911,6 +911,38 @@ body {
   letter-spacing: 0.5px;
 }
 
+/*
+ * Brief notification used by the Hint unlock flow ("Hint unlocked
+ * for this colour."). Floats just under the topbar, semi-opaque
+ * pill, fades in/out via the .paint-toast-visible class toggle.
+ * Pointer-events:none so it never intercepts a paint tap.
+ */
+.paint-toast {
+  position: absolute;
+  top: calc(60px + env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%) translateY(-6px);
+  padding: 8px 14px;
+  border-radius: 18px;
+  background: rgba(20, 30, 45, 0.92);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  z-index: 25;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 220ms ease-out, transform 220ms ease-out;
+  /* The message can be long in some languages — wrap rather than
+     overflow off the viewport. */
+  max-width: calc(100% - 32px);
+  text-align: center;
+}
+.paint-toast-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
 .paint-completion {
   position: absolute;
   inset: 0;

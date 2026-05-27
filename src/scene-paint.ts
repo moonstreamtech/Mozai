@@ -187,29 +187,18 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         .then((granted) => {
           if (cancelled || !state || !renderer) return;
           if (!granted) return;
-          // New hint behaviour (replaces the old grey-tint reveal):
-          // auto-fill every unpainted cell of the selected colour.
-          // The player gets the colour completed in one go in
-          // exchange for a rewarded ad. Selection outlines for
-          // that colour vanish naturally on the next draw because
-          // every cell now has filled === 1.
-          const filledN = autoFillColor(state, renderer, colorForHint);
-          diagLog(`hint autoFill: color=${colorForHint} cellsFilled=${filledN}`);
-          if (filledN > 0) {
-            updatePalette();
-            updateOverall();
-            scheduleSave();
-            // The colour is now (almost certainly) at 100%; drop
-            // its swatch and clear selection — same path the
-            // last-cell-filled flow uses.
-            const s = state.snapshot();
-            if (s.colorFilled[colorForHint] >= s.colorTotal[colorForHint]) {
-              maybeDropSwatch(colorForHint);
-            }
-            if (s.complete && loadFinished) {
-              onPuzzleCompleted('cell-filled');
-            }
-          }
+          // Hint behaviour: UNLOCK the selection outline for this
+          // colour for the rest of this picture's life. revealHint()
+          // adds the index to state.hintRevealed; the renderer's
+          // drawSelectionOutlines checks that set on every frame, so
+          // a single scheduleFrame() is enough to make the outline
+          // appear. Persisted via PersistEnvelope.hints[] on the
+          // next save.
+          state.revealHint(colorForHint);
+          renderer.scheduleFrame();
+          scheduleSave();
+          diagLog(`hint unlock: color=${colorForHint}`);
+          showToast(root, t('hintUnlocked'));
         })
         .finally(() => {
           if (cancelled) return;
@@ -491,12 +480,18 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     }
 
     function updateHintBtn(): void {
-      if (!state) {
+      // Hint button is enabled iff there's a selected colour, that
+      // colour's outline isn't already unlocked, AND that colour
+      // isn't already 100% filled. All other cases disable it (no
+      // double-purchase, no wasted reward on a finished colour).
+      if (!state || selectedColor < 0) {
         hintBtn.disabled = true;
         hintBtn.textContent = `💡 ${t('hint')}`;
         return;
       }
-      if (selectedColor < 0) {
+      const total = state.colorTotal[selectedColor] ?? 0;
+      const done = state.colorFilled[selectedColor] ?? 0;
+      if (total === 0 || done >= total) {
         hintBtn.disabled = true;
         hintBtn.textContent = `💡 ${t('hint')}`;
         return;
@@ -614,34 +609,21 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
 }
 
 /**
- * Auto-fill every unpainted cell whose target is `colorIdx`.
- * Returns the count of cells actually filled.
- *
- * Used by the new Hint flow: spending a rewarded-ad reward instantly
- * completes the selected colour. We collect the indices into a
- * single array then ask the renderer to do one batched offscreen
- * upload — for a 1000×1000 puzzle's ~200k colour-matching cells
- * this is the difference between a frozen 200k putImageData calls
- * and a single full-buffer upload.
- *
- * attemptFill is called per cell so per-colour counters and the
- * filledCount totals stay in sync with the persistence layer.
+ * Brief top-of-scene confirmation banner used by the Hint unlock
+ * flow ("Hint unlocked for this colour."). Fades in on the next
+ * frame, fades out after ~1.5 s, removes itself. Multiple toasts
+ * can stack — each is independent.
  */
-function autoFillColor(
-  state: PaintState,
-  renderer: PaintRenderer,
-  colorIdx: number,
-): number {
-  const { solution, filled } = state;
-  const newlyFilled: number[] = [];
-  for (let i = 0; i < solution.length; i++) {
-    if (solution[i] !== colorIdx) continue;
-    if (filled[i]) continue;
-    const result = state.attemptFill(i, colorIdx);
-    if (result.changed) newlyFilled.push(i);
-  }
-  renderer.bulkUpdateCellsFilled(newlyFilled);
-  return newlyFilled.length;
+function showToast(scene: HTMLElement, message: string): void {
+  const toast = document.createElement('div');
+  toast.className = 'paint-toast';
+  toast.textContent = message;
+  scene.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('paint-toast-visible'));
+  window.setTimeout(() => {
+    toast.classList.remove('paint-toast-visible');
+    window.setTimeout(() => toast.remove(), 300);
+  }, 1500);
 }
 
 function doBack(ctx: SceneContext): void {

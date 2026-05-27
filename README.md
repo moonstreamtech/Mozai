@@ -172,6 +172,21 @@ The `bootLog()` machinery itself is also unaffected: log lines still
 go to `console.info` and stay buffered, so a `reportError()` later
 in the boot still surfaces them in the error panel.
 
+### Pre-release flag checklist
+
+A handful of source constants and env vars are wired ON during
+development. They MUST be flipped before publishing a release:
+
+| Constant / env var | File / source | Production value |
+| --- | --- | --- |
+| `SHOW_DEBUG_BUTTON` | `src/error-overlay.ts` | `false` (hides the 🐞 button) |
+| `UNLOCK_ALL_ROOMS` | `src/scene-rooms.ts` | `false` (re-arms the lock chain) |
+| `VITE_BOOT_DEBUG` | env at build time | unset (boot strip stays off) |
+| `MOZAI_ADMOB_TESTING` | env at build time | unset for production (CI's `release.yml` already omits it; `build.yml` sets `'1'` because PR APKs shouldn't serve real ads) |
+
+A pre-release script could grep for the relevant identifiers and
+fail if any are still on; for now we rely on this checklist.
+
 ---
 
 ## Build, run, deploy

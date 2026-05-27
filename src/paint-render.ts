@@ -178,33 +178,6 @@ export class PaintRenderer {
     this.scheduleFrame();
   }
 
-  /**
-   * Batch-update a list of cells that just got filled (e.g. from a
-   * hint auto-fill). Writes the palette RGBA straight into the
-   * offscreen ImageData buffer and uploads it via a SINGLE
-   * putImageData of the whole offscreen — many cheaper than
-   * one putImageData per cell when the list is large (a 1000×1000
-   * hint can fill 200k cells). One scheduleFrame at the end.
-   */
-  bulkUpdateCellsFilled(indices: number[]): void {
-    if (indices.length === 0) return;
-    const { state, offscreenData, paletteRgba } = this;
-    const data = offscreenData.data;
-    for (let k = 0; k < indices.length; k++) {
-      const i = indices[k];
-      const v = state.solution[i];
-      if (v < 0) continue;
-      const p = i * 4;
-      const pp = v * 4;
-      data[p] = paletteRgba[pp];
-      data[p + 1] = paletteRgba[pp + 1];
-      data[p + 2] = paletteRgba[pp + 2];
-      data[p + 3] = paletteRgba[pp + 3];
-    }
-    this.offscreenCtx.putImageData(offscreenData, 0, 0);
-    this.scheduleFrame();
-  }
-
   scheduleFrame(): void {
     if (this.rafId !== 0) return;
     this.rafId = requestAnimationFrame(() => {
@@ -299,6 +272,13 @@ export class PaintRenderer {
   ): void {
     const sel = this.selectedColor;
     if (sel < 0) return;
+    // Outline is gated on a per-colour hint UNLOCK. By default a
+    // selected colour shows no outline — the player paints blind.
+    // Spending a rewarded Hint ad calls state.revealHint(colour),
+    // which adds the colour to state.hintRevealed; from then on the
+    // outline appears whenever that colour is the selection. The
+    // unlock persists with paint state (PersistEnvelope.hints[]).
+    if (!this.state.hintRevealed.has(sel)) return;
     if (pxPerCell < 8) return;
     const { ctx, state } = this;
     const palettePos = sel * 4;

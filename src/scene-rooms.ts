@@ -36,6 +36,21 @@ import { t } from './i18n.js';
 
 const COLUMNS = 5;
 
+/**
+ * TEMPORARY (development / testing): when true, every room is
+ * tappable regardless of the lock-chain rule
+ * (completedCountForRoom(K-1) >= K). Lets us reach the 1000×1000
+ * perf-test puzzle in room 100 without first completing rooms
+ * 1-99. Visual styling for locked cells still applies as written;
+ * the bypass is purely on the tappable flag at the click site.
+ *
+ * MUST be flipped to false before release, alongside:
+ *   - SHOW_DEBUG_BUTTON in src/error-overlay.ts
+ *   - VITE_BOOT_DEBUG (env var, defaults off)
+ *   - any MOZAI_ADMOB_TESTING build env in CI workflows
+ */
+const UNLOCK_ALL_ROOMS = true;
+
 export const roomsSceneMount: SceneMount = (host, ctx) => {
   // The scene owns one root element appended to #game. Tearing this
   // root down on teardown() is sufficient — every listener attached
@@ -90,7 +105,9 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
 function buildRoomCell(n: number, ctx: SceneContext): HTMLElement {
   const total = ctx.index.rooms[String(n)]?.length ?? 0;
   const done = completedCountForRoom(n, ctx.index);
-  const unlocked = isRoomUnlocked(n, (k) => completedCountForRoom(k, ctx.index));
+  const unlocked =
+    UNLOCK_ALL_ROOMS ||
+    isRoomUnlocked(n, (k) => completedCountForRoom(k, ctx.index));
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   const cell = document.createElement('button');

@@ -417,6 +417,59 @@ const STRINGS_COMPLETE_FINISHED: LangMap = {
   ca: 'Has acabat {name}.',
 };
 
+const STRINGS_HINT_UNLOCKED: LangMap = {
+  en: 'Hint unlocked for this colour.',
+  es: 'Pista desbloqueada para este color.',
+  fr: 'Indice débloqué pour cette couleur.',
+  de: 'Tipp für diese Farbe freigeschaltet.',
+  it: 'Suggerimento sbloccato per questo colore.',
+  pt: 'Dica desbloqueada para esta cor.',
+  'pt-BR': 'Dica desbloqueada para esta cor.',
+  ru: 'Подсказка для этого цвета открыта.',
+  uk: 'Підказка для цього кольору відкрита.',
+  pl: 'Wskazówka odblokowana dla tego koloru.',
+  cs: 'Nápověda odemčena pro tuto barvu.',
+  sk: 'Pomôcka odomknutá pre túto farbu.',
+  ro: 'Sugestie deblocată pentru această culoare.',
+  hu: 'Tipp feloldva ehhez a színhez.',
+  bg: 'Подсказка отключена за този цвят.',
+  hr: 'Savjet otključan za ovu boju.',
+  sr: 'Савет откључан за ову боју.',
+  sl: 'Namig odklenjen za to barvo.',
+  nl: 'Hint vrijgespeeld voor deze kleur.',
+  sv: 'Tips upplåst för denna färg.',
+  da: 'Tip låst op for denne farve.',
+  nb: 'Tips låst opp for denne fargen.',
+  fi: 'Vihje avattu tälle värille.',
+  el: 'Η βοήθεια ξεκλείδωσε για αυτό το χρώμα.',
+  tr: 'Bu renk için ipucu açıldı.',
+  ja: 'この色のヒントが解放されました。',
+  ko: '이 색상의 힌트가 열렸습니다.',
+  'zh-CN': '该颜色的提示已解锁。',
+  'zh-TW': '該顏色的提示已解鎖。',
+  ar: 'تم فتح التلميح لهذا اللون.',
+  he: 'הרמז נפתח עבור הצבע הזה.',
+  fa: 'راهنما برای این رنگ فعال شد.',
+  ur: 'اس رنگ کے لیے اشارہ کھول دیا گیا۔',
+  hi: 'इस रंग के लिए संकेत खुला।',
+  bn: 'এই রঙের জন্য ইঙ্গিত খোলা হলো।',
+  ta: 'இந்த நிறத்திற்கான குறிப்பு திறக்கப்பட்டது.',
+  te: 'ఈ రంగు కోసం సూచన అన్‌లాక్ చేయబడింది.',
+  mr: 'या रंगासाठी सूचना उघडली.',
+  ml: 'ഈ നിറത്തിന് സൂചന തുറന്നു.',
+  gu: 'આ રંગ માટે સંકેત ખુલ્યો.',
+  kn: 'ಈ ಬಣ್ಣಕ್ಕೆ ಸುಳಿವು ಅನ್‌ಲಾಕ್ ಆಯಿತು.',
+  pa: 'ਇਸ ਰੰਗ ਲਈ ਸੰਕੇਤ ਖੁੱਲ੍ਹ ਗਿਆ।',
+  id: 'Petunjuk terbuka untuk warna ini.',
+  ms: 'Petunjuk dibuka untuk warna ini.',
+  vi: 'Đã mở khóa gợi ý cho màu này.',
+  th: 'ปลดล็อกคำใบ้สำหรับสีนี้แล้ว',
+  fil: 'Na-unlock ang pahiwatig para sa kulay na ito.',
+  sw: 'Dokezo limefunguliwa kwa rangi hii.',
+  af: 'Wenk vir hierdie kleur ontsluit.',
+  ca: 'Pista desbloquejada per a aquest color.',
+};
+
 const STRINGS_NEEDS_INTERNET: LangMap = {
   en: 'Internet needed to load this room (first time only).',
   es: 'Se necesita internet para cargar esta sala (solo la primera vez).',
@@ -491,7 +544,8 @@ const STRINGS_DONE_BADGE: LangMap = {
 type StringKey =
   | 'room' | 'chooseRoom' | 'loadingPictures' | 'loadingPuzzle'
   | 'noPicturesYet' | 'couldNotLoadThumbs' | 'couldNotLoadPuzzle' | 'retry'
-  | 'hint' | 'hinted' | 'done' | 'completeTitle' | 'completeFinished' | 'doneBadge'
+  | 'hint' | 'hinted' | 'hintUnlocked'
+  | 'done' | 'completeTitle' | 'completeFinished' | 'doneBadge'
   | 'needsInternet';
 
 const TABLE: Record<StringKey, LangMap> = {
@@ -505,6 +559,7 @@ const TABLE: Record<StringKey, LangMap> = {
   retry: STRINGS_RETRY,
   hint: STRINGS_HINT,
   hinted: STRINGS_HINTED,
+  hintUnlocked: STRINGS_HINT_UNLOCKED,
   done: STRINGS_DONE,
   completeTitle: STRINGS_COMPLETE_TITLE,
   completeFinished: STRINGS_COMPLETE_FINISHED,
