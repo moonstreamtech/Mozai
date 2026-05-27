@@ -781,7 +781,20 @@ body {
 .paint-topbar {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: 44px 1fr auto;
+  /*
+   * Three fixed-width side columns + a flexible centre. Left is the
+   * back button (44px square), right is the Hint button (locked to
+   * a fixed pixel width so its label changing — "💡 Hint" →
+   * "💡 Hinted" → "💡 Indice utilisé" → "💡 ヒント済" across 50
+   * locales — never resizes the column and therefore never shifts
+   * the centred title sideways. The widest expected label at 13px
+   * with the +0.5px letter-spacing is "💡 Indice utilisé" (French,
+   * ~135 px rendered); 150px gives ~15 px of breathing room before
+   * the longest known variant hits the ellipsis. Any pathological
+   * longer label ellipsizes inside the button rather than
+   * reflowing the topbar.
+   */
+  grid-template-columns: 44px 1fr 150px;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
@@ -819,6 +832,14 @@ body {
 }
 
 .hint-btn {
+  /*
+   * width:100% + grid column 140px → button is always exactly the
+   * column's width regardless of label content. Combined with
+   * ellipsis on overflow, an unexpectedly long localised label is
+   * clipped inside the button rather than allowed to widen the
+   * column and push the centred title sideways.
+   */
+  width: 100%;
   padding: 8px 12px;
   font: inherit;
   font-weight: 700;
@@ -829,6 +850,10 @@ body {
   border-radius: 8px;
   cursor: pointer;
   letter-spacing: 0.5px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .hint-btn:disabled {
