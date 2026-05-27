@@ -32,7 +32,7 @@
  * of the hint flow can be exercised end-to-end without a real ad.
  */
 
-import type { AdMobConfig } from './env.js';
+import { maskAdId, type AdMobConfig } from './env.js';
 import { diagLog } from './error-overlay.js';
 
 type AdMobModule = typeof import('@capacitor-community/admob');
@@ -118,10 +118,14 @@ export async function showRewarded(): Promise<boolean> {
   const AdMob = holder.mod.AdMob;
 
   try {
-    diagLog(`hint: prepare adId=${maskAdId(config.rewardedUnitId)} isTesting=${config.mode === 'TEST'}`);
+    diagLog(
+      `hint: prepare adId=${maskAdId(config.rewardedUnitId)} ` +
+        `isTesting=${config.isTesting} mode=${config.mode} ` +
+        `forceTesting=${config.forceTesting}`,
+    );
     await AdMob.prepareRewardVideoAd({
       adId: config.rewardedUnitId,
-      isTesting: config.mode === 'TEST',
+      isTesting: config.isTesting,
     });
     diagLog('hint: show');
     const reward = await AdMob.showRewardVideoAd();
@@ -135,13 +139,6 @@ export async function showRewarded(): Promise<boolean> {
     diagLog(`hint: dismissed/failed reason=${msg}`);
     return false;
   }
-}
-
-function maskAdId(id: string): string {
-  // Show only the prefix so the diag log is useful without leaking
-  // the real publisher's unit id to whoever can read the popup.
-  if (!id) return '(empty)';
-  return id.length > 12 ? `${id.slice(0, 12)}…` : id;
 }
 
 function webFallback(mode: AdMobConfig['mode']): boolean {

@@ -44,8 +44,13 @@ jobs:
 
       - name: Build web bundle
         env:
-          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
-          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml; only per-
+          # placement ad-unit IDs come from secrets. MOZAI_ADMOB_TESTING
+          # is deliberately UNSET in release.yml — push-to-main is the
+          # production-artifact build path, so real ads should serve.
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
         run: npm run build
 
       - name: Sync Capacitor → Android
@@ -76,10 +81,11 @@ jobs:
       - name: Build release AAB + APK
         working-directory: android
         env:
-          # AdMob ids — substituted into AndroidManifest at build
-          # time and read at runtime by the SDK.
-          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
-          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml — Gradle no
+          # longer needs any AdMob env injection. The web build
+          # above is the only place that consumes the ad-unit ID
+          # secrets.
           # Signing credentials. Empty values trigger app/build.gradle's
           # debug-signing fallback so the build still succeeds (with a
           # clearly-logged "DEBUG fallback" mode line).

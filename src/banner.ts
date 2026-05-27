@@ -156,11 +156,15 @@ export async function initBanner(opts: InitBannerOpts): Promise<BannerHandle> {
     return { mode: config.mode, runtime: 'web' };
   }
 
-  // Initialise SDK. `initializeForTesting` ensures every device behaves
-  // as a test device under TEST mode so we never accidentally bill a
-  // real impression during development; under PRODUCTION mode the
-  // flag is omitted so live ads are served normally.
-  await plugin.initialize(config.mode === 'TEST' ? { initializeForTesting: true } : {});
+  // Initialise SDK. `initializeForTesting` ensures every device
+  // behaves as a test device so we never accidentally bill a real
+  // impression during development. It's true when EITHER (a) we're
+  // falling back to test placement ids (mode === 'TEST') OR (b) the
+  // explicit MOZAI_ADMOB_TESTING flag is set on a real-ids build
+  // (developer running QA on their personal phone). When both are
+  // off — i.e. a real production build — initializeForTesting is
+  // omitted so live ads are served normally.
+  await plugin.initialize(config.isTesting ? { initializeForTesting: true } : {});
 
   // Subscribe BEFORE showBanner so we never miss the first size event.
   // The plugin emits the event with the rendered height in CSS pixels
@@ -175,7 +179,7 @@ export async function initBanner(opts: InitBannerOpts): Promise<BannerHandle> {
       adSize: 'ADAPTIVE_BANNER',
       position: 'BOTTOM_CENTER',
       margin: 0,
-      isTesting: config.mode === 'TEST',
+      isTesting: config.isTesting,
     });
     // eslint-disable-next-line no-console
     console.info(`[Mozai] Banner runtime: NATIVE (anchored adaptive). AdMob mode: ${config.mode}`);

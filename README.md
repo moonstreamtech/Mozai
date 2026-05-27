@@ -215,25 +215,39 @@ verify rule 2 by eye: `vv.h`, `bannerH`, `#game.h`, `dpr`.
 
 ## AdMob configuration
 
-Real ad ids come from GitHub Secrets at CI time. Missing values fall back
-to [Google's official AdMob test ids](https://developers.google.com/admob/android/test-ads)
-so dev and CI never serve real ads.
+The AdMob **App ID** (the `ca-app-pub-...~...` value) is hardcoded in
+`android/app/src/main/AndroidManifest.xml` — it's a stable per-app
+identifier issued once by the AdMob console and doesn't vary across
+builds.
 
-| Secret | Used as | Required for |
+The two per-placement **ad-unit IDs** (the `.../...` values) come from
+GitHub Secrets at CI time. Missing values fall back to
+[Google's official AdMob test ids](https://developers.google.com/admob/android/test-ads)
+for the matching placement (banner test id for banner, rewarded test
+id for rewarded — they are not interchangeable).
+
+| Secret | Read by | Notes |
 | --- | --- | --- |
-| `MOZAI_ADMOB_APP_ID` | `AndroidManifest` meta-data placeholder + Vite env | Release |
-| `MOZAI_ADMOB_BANNER_UNIT_ID` | `showBanner({adId})` | Release |
-| `MOZAI_ADMOB_REWARDED_ID` | `showRewardVideoAd({adId})` for the paint-scene Hint button | Release |
+| `MOZAI_ADMOB_BANNER_ID` | `import.meta.env.MOZAI_ADMOB_BANNER_ID` → `AdMob.showBanner({ adId })` | Required for real ads on the banner |
+| `MOZAI_ADMOB_REWARDED_ID` | `import.meta.env.MOZAI_ADMOB_REWARDED_ID` → `AdMob.showRewardVideoAd({ adId })` for the Hint button | Required for real ads on hints |
+| `MOZAI_ADMOB_TESTING` (env, not secret) | Forces `isTesting: true` + `initializeForTesting` on every plugin call regardless of placement IDs | Set on developer / QA builds to avoid "tapping your own ads" account flags |
 
-The Vite build reads these at bundle time (env vars prefixed `MOZAI_`).
-The Android Gradle script reads `MOZAI_ADMOB_APP_ID` and substitutes the
-manifest placeholder `${admobAppId}`. The startup log line prints which
-mode (`PRODUCTION` / `TEST`) the build was produced in — the id values
-themselves are never logged.
+The mode is logged on boot via the 🐞 popup:
+```
+admob: ids=REAL testing=true forceTesting=true banner=ca-app-pub-6334…7843722225 rewarded=ca-app-pub-6334…8145459184
+```
+`ids` reports whether real placement IDs are configured (`REAL`) or
+the Google test ids are being used (`TEST`). `testing` is the
+effective `isTesting` flag passed to the AdMob plugin — true whenever
+`forceTesting` is on OR `ids === 'TEST'`. The full unit IDs are
+masked (publisher prefix + last 10 chars).
 
-Mirroring Last Tile, CI also greps the output bundle for the test
-publisher prefix `ca-app-pub-3940256099942544` and fails the release
-build if found (post-build content scan).
+CI defaults:
+- `.github/workflows/build.yml` (PR debug APK) sets `MOZAI_ADMOB_TESTING='1'`
+  so any artifact pulled off a debug job serves test creatives.
+- `.github/workflows/release.yml` (push-to-main, release artifacts)
+  deliberately leaves `MOZAI_ADMOB_TESTING` unset so production
+  builds serve real ads.
 
 ---
 
@@ -248,9 +262,8 @@ the workflow).
 
 | Secret | Used by | Notes |
 | --- | --- | --- |
-| `MOZAI_ADMOB_APP_ID` | manifest placeholder + Vite env | Required for real ads |
-| `MOZAI_ADMOB_BANNER_UNIT_ID` | `showBanner({adId})` | Required for real ads |
-| `MOZAI_ADMOB_REWARDED_ID` | `showRewardVideoAd({adId})` for paint-scene hints | Required for real rewarded ads |
+| `MOZAI_ADMOB_BANNER_ID` | `showBanner({adId})` | Required for real banner ads (test id fallback when missing) |
+| `MOZAI_ADMOB_REWARDED_ID` | `showRewardVideoAd({adId})` for paint-scene hints | Required for real rewarded ads (test id fallback when missing) |
 | `MOZAI_KEYSTORE_BASE64` | decoded to `android/app/mozai-release.keystore` at CI time | Required for a Play-uploadable build |
 | `MOZAI_KEYSTORE_PASSWORD` | `signingConfigs.release.storePassword` | Required for release signing |
 | `MOZAI_KEY_ALIAS` | `signingConfigs.release.keyAlias` | Required for release signing |

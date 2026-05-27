@@ -10,15 +10,23 @@
         android:theme="@style/AppTheme">
 
         <!--
-            AdMob app id. Value comes from a Gradle manifest placeholder
-            (app/build.gradle resolves MOZAI_ADMOB_APP_ID env or falls
-            back to the Google AdMob test id). Required by the SDK at
-            process start; a missing or wrong value crashes the app the
-            moment AdMob.initialize() is called.
+            AdMob Application ID. This is the publisher-specific App
+            ID from the AdMob console (the one with the `~` separator)
+            — distinct from the per-placement ad-unit IDs (the ones
+            with `/`). Required by the SDK at process start: a missing
+            or wrong value crashes the app the moment AdMob.initialize()
+            is called.
+
+            Hardcoded here (not env-injected) because the App ID is a
+            stable per-app identifier that never varies across builds.
+            The two per-placement ad-unit IDs (banner, rewarded) DO
+            come from env vars (MOZAI_ADMOB_BANNER_ID,
+            MOZAI_ADMOB_REWARDED_ID) so dev / staging / prod can each
+            use their own placements; see src/env.ts.
         -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="${admobAppId}" />
+            android:value="ca-app-pub-6334019930414150~5161718562" />
 
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"

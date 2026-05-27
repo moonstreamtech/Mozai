@@ -24,7 +24,7 @@
 import { attachResize } from './resize.js';
 import { makePlaceholderGrid } from './placeholder-grid.js';
 import { initBanner } from './banner.js';
-import { isDebugReadoutEnabled, readAdMobConfig } from './env.js';
+import { isDebugReadoutEnabled, maskAdId, readAdMobConfig } from './env.js';
 import { mountDebugReadout } from './debug-readout.js';
 import { loadContentIndex, type ContentIndex } from './content.js';
 import { load as loadProgress, debugMarkCompleted, debugReset } from './progress.js';
@@ -77,7 +77,16 @@ async function boot(): Promise<void> {
   }
 
   const adConfig = readAdMobConfig();
-  bootLog(`config: admob=${adConfig.mode} base=${import.meta.env.BASE_URL ?? '(unset)'}`);
+  // Full AdMob mode dump for the 🐞 popup. Publisher prefix is
+  // visible (not secret) so we can confirm REAL vs TEST placements
+  // at a glance; the rest of the unit id is masked.
+  bootLog(
+    `admob: ids=${adConfig.mode} testing=${adConfig.isTesting} ` +
+      `forceTesting=${adConfig.forceTesting} ` +
+      `banner=${maskAdId(adConfig.bannerUnitId)} ` +
+      `rewarded=${maskAdId(adConfig.rewardedUnitId)}`,
+  );
+  bootLog(`config: base=${import.meta.env.BASE_URL ?? '(unset)'}`);
 
   initBanner({ config: adConfig, bannerEl }).catch((err) => {
     reportError('initBanner threw', err);

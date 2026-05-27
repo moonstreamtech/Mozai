@@ -1,59 +1,98 @@
 /*
- * Build-time configuration. All values come from Vite env vars
- * (prefix MOZAI_) which are populated from GitHub Secrets at CI
- * time and from a developer-local `.env` for manual builds.
+ * Build-time AdMob configuration.
  *
- * Mirrors Last Tile's approach: real ids come from secrets, test ids
- * are used as a fallback so dev and CI never serve real ads. The mode
- * (`PRODUCTION` vs `TEST`) is logged at startup; the actual id values
- * are not.
+ * Two per-placement ad-unit IDs come from Vite env vars (prefix
+ * MOZAI_), which are populated from GitHub Secrets at CI time and
+ * from a developer-local `.env` for manual builds:
  *
- * On the Capacitor side the AdMob "app id" is wired into the native
- * AndroidManifest via a manifest placeholder set at build time; the
- * value here is informational only (for the startup log and the debug
- * readout).
+ *   MOZAI_ADMOB_BANNER_ID    — anchored adaptive banner unit
+ *   MOZAI_ADMOB_REWARDED_ID  — rewarded video unit (Hint button)
+ *
+ * The AdMob App ID itself is HARDCODED in
+ * android/app/src/main/AndroidManifest.xml — it's a stable per-app
+ * identifier issued by the AdMob console and doesn't vary across
+ * builds.
+ *
+ * When either ad-unit env var is missing, we fall back to Google's
+ * official AdMob test ids for that placement so dev and CI never
+ * serve real ads. The `mode` is promoted to REAL only when BOTH
+ * placement env vars are present.
+ *
+ *   MOZAI_ADMOB_TESTING — independent of `mode`. When set ("1" /
+ *     "true"), forces test-creative behaviour (`isTesting: true`
+ *     on every plugin call + `initializeForTesting`) EVEN when
+ *     real placement IDs are configured. This is the "I'm
+ *     developing on my own phone, please don't ban my AdMob
+ *     account for tapping my own ads" switch — real IDs serve
+ *     test creatives.
+ *
+ * Mode matrix:
+ *   ids=REAL, testing=false  — production
+ *   ids=REAL, testing=true   — real placements, test creatives (dev)
+ *   ids=TEST, testing=*      — test placements, always test creatives
  */
 
 // Google's official AdMob test ids. Documented at
 // https://developers.google.com/admob/android/test-ads. Identifiable
-// by the "ca-app-pub-3940256099942544" publisher prefix, which the CI
-// post-build scan greps for to prevent test ids landing in a release
-// artifact.
+// by the "ca-app-pub-3940256099942544" publisher prefix, which the
+// CI post-build scan greps for to prevent test ids landing in a
+// release artifact.
 export const ADMOB_TEST_PUBLISHER_PREFIX = 'ca-app-pub-3940256099942544';
-export const ADMOB_TEST_APP_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}~3347511713`;
 export const ADMOB_TEST_BANNER_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/6300978111`;
-// Reward-video test id (separate AdMob unit type — banner test id does
-// not work for rewarded format).
+// Rewarded-video test id — separate AdMob unit type. The banner
+// test id does NOT work for rewarded format.
 export const ADMOB_TEST_REWARDED_UNIT_ID = `${ADMOB_TEST_PUBLISHER_PREFIX}/5224354917`;
 
-type Mode = 'PRODUCTION' | 'TEST';
+type Mode = 'REAL' | 'TEST';
 
 export interface AdMobConfig {
-  appId: string;
   bannerUnitId: string;
   rewardedUnitId: string;
+  /** REAL if both real placement ids are configured; TEST otherwise. */
   mode: Mode;
+  /**
+   * Force every plugin call to behave as a test request, regardless
+   * of `mode`. Lets us run real IDs against test creatives during
+   * device QA.
+   */
+  forceTesting: boolean;
+  /** Convenience: forceTesting || mode === 'TEST'. The boolean every plugin call needs. */
+  isTesting: boolean;
+}
+
+function envFlag(value: string | undefined): boolean {
+  if (!value) return false;
+  return value !== '0' && value !== 'false' && value !== '';
+}
+
+export function readAdMobConfig(): AdMobConfig {
+  const envBanner = (import.meta.env.MOZAI_ADMOB_BANNER_ID ?? '').trim();
+  const envRewarded = (import.meta.env.MOZAI_ADMOB_REWARDED_ID ?? '').trim();
+  const haveReal = envBanner !== '' && envRewarded !== '';
+  const forceTesting = envFlag(import.meta.env.MOZAI_ADMOB_TESTING);
+  const mode: Mode = haveReal ? 'REAL' : 'TEST';
+  return {
+    bannerUnitId: haveReal ? envBanner : ADMOB_TEST_BANNER_UNIT_ID,
+    rewardedUnitId: haveReal ? envRewarded : ADMOB_TEST_REWARDED_UNIT_ID,
+    mode,
+    forceTesting,
+    isTesting: forceTesting || mode === 'TEST',
+  };
 }
 
 /**
- * Read the AdMob configuration from build-time env. Empty / missing
- * values fall back to the official Google test ids. The mode is
- * promoted to PRODUCTION only when both real ids that the app
- * actively requests at runtime (banner + rewarded) are present —
- * otherwise we'd risk a release where the banner is real and the
- * rewarded hint silently serves test ads (or vice versa).
+ * Mask an ad-unit id for diag logs: keep the publisher prefix
+ * visible (it's not secret — it's the same for every placement under
+ * one publisher) and the trailing 10 chars, hide the middle. The
+ * result still tells us "this is the real publisher 6334… vs the
+ * test publisher 3940…" without leaking the entire unit id to
+ * whoever can read the device's debug popup.
  */
-export function readAdMobConfig(): AdMobConfig {
-  const envAppId = (import.meta.env.MOZAI_ADMOB_APP_ID ?? '').trim();
-  const envBanner = (import.meta.env.MOZAI_ADMOB_BANNER_UNIT_ID ?? '').trim();
-  const envRewarded = (import.meta.env.MOZAI_ADMOB_REWARDED_ID ?? '').trim();
-  const haveReal = envAppId !== '' && envBanner !== '' && envRewarded !== '';
-  return {
-    appId: haveReal ? envAppId : ADMOB_TEST_APP_ID,
-    bannerUnitId: haveReal ? envBanner : ADMOB_TEST_BANNER_UNIT_ID,
-    rewardedUnitId: haveReal ? envRewarded : ADMOB_TEST_REWARDED_UNIT_ID,
-    mode: haveReal ? 'PRODUCTION' : 'TEST',
-  };
+export function maskAdId(id: string): string {
+  if (!id) return '(empty)';
+  if (id.length <= 20) return id;
+  // ca-app-pub-XXXX…/YYYYYYYYYY
+  return `${id.slice(0, 15)}…${id.slice(-10)}`;
 }
 
 /**

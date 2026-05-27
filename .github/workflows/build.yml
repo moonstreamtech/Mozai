@@ -40,8 +40,16 @@ jobs:
 
       - name: Build (typecheck + vite)
         env:
-          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
-          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+          # The AdMob App ID is hardcoded in
+          # android/app/src/main/AndroidManifest.xml; only per-
+          # placement ad-unit IDs come from secrets.
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
+          # Force test creatives on this CI build so any AAB pulled
+          # off CI for a personal-device install can't accidentally
+          # serve real ads. CI never runs human-tap-tests, so this
+          # is the safer default.
+          MOZAI_ADMOB_TESTING: '1'
         run: npm run build
 
       - uses: actions/upload-artifact@v4
@@ -78,8 +86,9 @@ jobs:
 
       - name: Web build (for cap sync)
         env:
-          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
-          MOZAI_ADMOB_BANNER_UNIT_ID: ${{ secrets.MOZAI_ADMOB_BANNER_UNIT_ID }}
+          MOZAI_ADMOB_BANNER_ID: ${{ secrets.MOZAI_ADMOB_BANNER_ID }}
+          MOZAI_ADMOB_REWARDED_ID: ${{ secrets.MOZAI_ADMOB_REWARDED_ID }}
+          MOZAI_ADMOB_TESTING: '1'
         run: npm run build
 
       - name: cap sync android
@@ -87,10 +96,8 @@ jobs:
 
       - name: Gradle assembleDebug
         working-directory: android
-        env:
-          # Substituted into AndroidManifest.xml via the
-          # `${admobAppId}` placeholder set in app/build.gradle.
-          MOZAI_ADMOB_APP_ID: ${{ secrets.MOZAI_ADMOB_APP_ID }}
+        # The AdMob App ID is hardcoded in AndroidManifest.xml; the
+        # Gradle build no longer needs any AdMob env injection.
         run: ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - uses: actions/upload-artifact@v4
@@ -100,21 +107,15 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      # Mirrors Last Tile's Layer 4 post-build content scan: when real
-      # secrets ARE set (i.e. this is a production build candidate),
-      # ensure the APK never contains the Google test publisher prefix.
-      # Skipped when no real secret is present — the build is then
-      # legitimately using test ids.
-      - name: Post-build test-id scan
-        if: ${{ env.HAS_REAL_SECRET == '1' }}
-        env:
-          HAS_REAL_SECRET: ${{ secrets.MOZAI_ADMOB_APP_ID != '' && '1' || '0' }}
-        run: |
-          set -e
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          if unzip -p "$APK" '*' | grep -q "3940256099942544"; then
-            echo "FATAL: APK contains the AdMob test publisher prefix."
-            echo "Real ad ids are configured for this build, so test ids must not appear."
-            exit 1
-          fi
-          echo "APK ad-id scan: clean (no test publisher prefix)."
+      # NOTE on Last Tile's "Layer 4" test-id content scan: it
+      # doesn't translate cleanly to this stack. Our JS bundle
+      # always includes the Google test publisher prefix as a
+      # fallback string constant (src/env.ts's
+      # ADMOB_TEST_BANNER_UNIT_ID / ADMOB_TEST_REWARDED_UNIT_ID), so
+      # grepping the APK for the prefix would always hit even when
+      # the runtime uses real IDs. We rely instead on:
+      #   - MOZAI_ADMOB_TESTING='1' set on every CI artifact (above)
+      #     so device-installable debug APKs never serve real ads.
+      #   - Visible boot diag (`admob: ids=... testing=...`) in the
+      #     🐞 popup confirms the mode on device.
+      #   - release.yml deciding when to omit MOZAI_ADMOB_TESTING.
