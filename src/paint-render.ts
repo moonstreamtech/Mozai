@@ -144,6 +144,24 @@ export class PaintRenderer {
   private readonly offscreenData: ImageData;
   /** Pre-parsed RGBA per palette index. */
   private readonly paletteRgba: Uint8ClampedArray;
+  /**
+   * Pre-parsed grayscale (luminance) RGBA per palette index. Used by
+   * the minimap offscreen so unpainted paintable cells render as a
+   * faded silhouette in the palette's own greyscale — the player
+   * sees progress as colour-fills-in-over-grayscale, mirroring the
+   * room-interior thumb convention.
+   */
+  private readonly paletteRgbaGray: Uint8ClampedArray;
+  /**
+   * Parallel offscreen rendered for the minimap. Same w×h as the
+   * main offscreen, but unpainted paintable cells render in their
+   * palette's grayscale luminance (not transparent / not the main
+   * canvas's silhouette grey). Lets the minimap show "discovery
+   * progress" at a glance.
+   */
+  private readonly minimapOffscreen: HTMLCanvasElement;
+  private readonly minimapOffscreenCtx: CanvasRenderingContext2D;
+  private readonly minimapOffscreenData: ImageData;
   /** Frame coalescing. */
   private rafId = 0;
 
@@ -180,67 +198,126 @@ export class PaintRenderer {
     this.offscreenCtx = offCtx;
     this.offscreenData = offCtx.createImageData(state.puzzle.w, state.puzzle.h);
 
+    // Parallel offscreen for the minimap: same w×h, different per-
+    // cell colour rule (grayscale unpainted vs true-colour painted)
+    // so the minimap shows discovery progress at a glance.
+    this.minimapOffscreen = document.createElement('canvas');
+    this.minimapOffscreen.width = state.puzzle.w;
+    this.minimapOffscreen.height = state.puzzle.h;
+    const mmCtx = this.minimapOffscreen.getContext('2d', { willReadFrequently: false });
+    if (!mmCtx) throw new Error('Minimap offscreen canvas 2D context unavailable');
+    this.minimapOffscreenCtx = mmCtx;
+    this.minimapOffscreenData = mmCtx.createImageData(state.puzzle.w, state.puzzle.h);
+
     this.paletteRgba = parsePalette(state.puzzle.palette);
+    this.paletteRgbaGray = parsePaletteGray(state.puzzle.palette);
 
     this.rebuildBuffer();
   }
 
   /**
-   * Walk every cell once and populate the offscreen pixel buffer.
-   * Called at boot and after restoring saved state — cheap for any
-   * size (1M pixel touches at ~5 ns each ≈ 5 ms).
+   * Walk every cell once and populate BOTH offscreen buffers (the
+   * main paint-canvas one and the minimap one). Called at boot and
+   * after restoring saved state. Cheap for any size (2 × 1M pixel
+   * touches at ~5 ns each ≈ 10 ms even on 1000×1000).
+   *
+   * Main offscreen rules:
+   *   -1 → transparent | painted → palette | hint → silhouette grey
+   *   | unpainted+no-hint → transparent
+   *
+   * Minimap offscreen rules:
+   *   -1 → transparent | painted → palette
+   *   | unpainted (regardless of hint) → palette grayscale luminance
+   * The minimap deliberately ignores hint reveal: the minimap shows
+   * "discovery progress" (colour fills in over grayscale), not the
+   * main canvas's silhouette/hint state.
    */
   rebuildBuffer(): void {
     const { solution, filled, hintRevealed } = this.state;
     const data = this.offscreenData.data;
+    const mmData = this.minimapOffscreenData.data;
     for (let i = 0; i < solution.length; i++) {
       const v = solution[i];
       const p = i * 4;
       if (v < 0) {
+        // Both buffers: transparent.
         data[p] = 0;
         data[p + 1] = 0;
         data[p + 2] = 0;
         data[p + 3] = 0;
+        mmData[p] = 0;
+        mmData[p + 1] = 0;
+        mmData[p + 2] = 0;
+        mmData[p + 3] = 0;
       } else if (filled[i]) {
+        // Both buffers: true palette colour.
         const pp = v * 4;
         data[p] = this.paletteRgba[pp];
         data[p + 1] = this.paletteRgba[pp + 1];
         data[p + 2] = this.paletteRgba[pp + 2];
         data[p + 3] = this.paletteRgba[pp + 3];
-      } else if (hintRevealed.has(v)) {
-        data[p] = SILHOUETTE_RGBA[0];
-        data[p + 1] = SILHOUETTE_RGBA[1];
-        data[p + 2] = SILHOUETTE_RGBA[2];
-        data[p + 3] = SILHOUETTE_RGBA[3];
+        mmData[p] = this.paletteRgba[pp];
+        mmData[p + 1] = this.paletteRgba[pp + 1];
+        mmData[p + 2] = this.paletteRgba[pp + 2];
+        mmData[p + 3] = this.paletteRgba[pp + 3];
       } else {
-        // Unfilled, not hinted — transparent. The white canvas
-        // background shows through; gridlines on top of the visible
-        // canvas distinguish each cell. Per-cell background-logo
-        // tiles (drawn over -1 cells only) make the empty field
-        // visibly different from this paintable-but-empty state.
-        data[p] = 0;
-        data[p + 1] = 0;
-        data[p + 2] = 0;
-        data[p + 3] = 0;
+        // Unfilled. Main canvas: silhouette grey only if hinted,
+        // else transparent. Minimap: always grayscale of palette
+        // colour so the silhouette stays visible there regardless
+        // of hint state.
+        const pp = v * 4;
+        mmData[p] = this.paletteRgbaGray[pp];
+        mmData[p + 1] = this.paletteRgbaGray[pp + 1];
+        mmData[p + 2] = this.paletteRgbaGray[pp + 2];
+        mmData[p + 3] = this.paletteRgbaGray[pp + 3];
+        if (hintRevealed.has(v)) {
+          data[p] = SILHOUETTE_RGBA[0];
+          data[p + 1] = SILHOUETTE_RGBA[1];
+          data[p + 2] = SILHOUETTE_RGBA[2];
+          data[p + 3] = SILHOUETTE_RGBA[3];
+        } else {
+          // Unfilled, not hinted — transparent on the main canvas.
+          // The white canvas background shows through; gridlines on
+          // top distinguish each cell. Per-cell background-logo
+          // tiles (drawn over -1 cells only) make the empty field
+          // visibly different from this paintable-but-empty state.
+          data[p] = 0;
+          data[p + 1] = 0;
+          data[p + 2] = 0;
+          data[p + 3] = 0;
+        }
       }
     }
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0);
+    this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0);
   }
 
-  /** Mark cell `i` as freshly filled — update offscreen + schedule a frame. */
+  /**
+   * Mark cell `i` as freshly filled — update BOTH offscreens (main +
+   * minimap) and schedule a frame. The minimap offscreen transitions
+   * the cell from grayscale → true colour at the same instant the
+   * main canvas transitions from transparent/silhouette → true
+   * colour, so progress on both renders synchronously.
+   */
   updateCellFilled(i: number): void {
     const v = this.state.solution[i];
     if (v < 0) return;
     const data = this.offscreenData.data;
+    const mmData = this.minimapOffscreenData.data;
     const p = i * 4;
     const pp = v * 4;
-    data[p] = this.paletteRgba[pp];
-    data[p + 1] = this.paletteRgba[pp + 1];
-    data[p + 2] = this.paletteRgba[pp + 2];
-    data[p + 3] = this.paletteRgba[pp + 3];
-    // For a single-cell update, putImageData on the cell rect is far
-    // cheaper than re-uploading the whole buffer (puts only 4 bytes).
-    this.offscreenCtx.putImageData(this.offscreenData, 0, 0, i % this.state.puzzle.w, Math.floor(i / this.state.puzzle.w), 1, 1);
+    const r = this.paletteRgba[pp];
+    const g = this.paletteRgba[pp + 1];
+    const b = this.paletteRgba[pp + 2];
+    const a = this.paletteRgba[pp + 3];
+    data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+    mmData[p] = r; mmData[p + 1] = g; mmData[p + 2] = b; mmData[p + 3] = a;
+    // Single-cell partial putImageData is far cheaper than re-
+    // uploading the whole buffer (puts only 4 bytes).
+    const cx = i % this.state.puzzle.w;
+    const cy = Math.floor(i / this.state.puzzle.w);
+    this.offscreenCtx.putImageData(this.offscreenData, 0, 0, cx, cy, 1, 1);
+    this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0, cx, cy, 1, 1);
     this.scheduleFrame();
   }
 
@@ -463,7 +540,12 @@ export class PaintRenderer {
     const offY = (bsH - drawnH) / 2;
 
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(this.offscreen, offX, offY, drawnW, drawnH);
+    // Use the MINIMAP offscreen (grayscale unpainted + true colour
+    // painted) — NOT the main offscreen (whose unpainted cells are
+    // transparent). The minimap is too small for the per-cell BG
+    // logos that distinguish -1 from paintable on the main canvas,
+    // so palette grayscale carries that information here.
+    ctx.drawImage(this.minimapOffscreen, offX, offY, drawnW, drawnH);
 
     // Viewport rectangle: maps the visible cell range in the main
     // canvas to the minimap. Clamped to the puzzle area so a
@@ -775,6 +857,34 @@ function parsePalette(palette: string[]): Uint8ClampedArray {
     out[i * 4] = r;
     out[i * 4 + 1] = g;
     out[i * 4 + 2] = b;
+    out[i * 4 + 3] = a;
+  }
+  return out;
+}
+
+/**
+ * Parse the hex palette into a flat Uint8ClampedArray of GRAYSCALE
+ * RGBA values (4 bytes per entry). Each palette colour is converted
+ * to its perceptual luminance via the standard Rec. 601 weighting,
+ * then stored as (luma, luma, luma, original_alpha). Used by the
+ * minimap offscreen so unpainted cells show the palette colour's
+ * grayscale silhouette — matching the room-interior thumb's
+ * grayscale-of-real-colour convention.
+ */
+function parsePaletteGray(palette: string[]): Uint8ClampedArray {
+  const rgba = parsePalette(palette);
+  const out = new Uint8ClampedArray(palette.length * 4);
+  for (let i = 0; i < palette.length; i++) {
+    const r = rgba[i * 4];
+    const g = rgba[i * 4 + 1];
+    const b = rgba[i * 4 + 2];
+    const a = rgba[i * 4 + 3];
+    // Rec. 601 luma — matches the room-interior thumbs (thumbs.ts
+    // renderThumb) so the silhouette greys agree across screens.
+    const luma = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    out[i * 4] = luma;
+    out[i * 4 + 1] = luma;
+    out[i * 4 + 2] = luma;
     out[i * 4 + 3] = a;
   }
   return out;

@@ -72,12 +72,12 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     root.className = 'scene scene-room';
     root.innerHTML = `
       <header class="scene-header">
-        <button class="back-btn" type="button" aria-label="Back to rooms">
+        <button class="back-btn" type="button" aria-label="${t('backToRooms')}">
           <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
-        <h1 class="scene-title">Room ${target.roomN}</h1>
+        <h1 class="scene-title">${t('room')} ${target.roomN}</h1>
         <span class="scene-spacer" aria-hidden="true"></span>
       </header>
       <div class="room-body"></div>
@@ -242,7 +242,7 @@ function buildLoadingTile(meta: PuzzleMeta): HTMLButtonElement {
   tile.type = 'button';
   tile.className = 'picture-tile is-loading';
   tile.setAttribute('role', 'listitem');
-  tile.setAttribute('aria-label', `${meta.id}, loading`);
+  tile.setAttribute('aria-label', `${meta.id}, ${t('picStateLoading')}`);
   tile.disabled = true;
   tile.innerHTML = `<span class="picture-tile-spinner" aria-hidden="true"></span>`;
   return tile;
@@ -269,10 +269,10 @@ function markTileReady(entry: TileEntry, ctx: SceneContext): void {
   if (entry.completed) tile.classList.add('is-completed');
   tile.disabled = false;
   const ariaState = entry.completed
-    ? 'completed'
+    ? t('picStateCompleted')
     : entry.filled
-      ? 'in progress'
-      : 'not started';
+      ? t('picStateInProgress')
+      : t('picStateNotStarted');
   tile.setAttribute('aria-label', `${entry.meta.id}, ${ariaState}`);
 
   tile.replaceChildren();
@@ -311,7 +311,7 @@ function markTileFailed(
   tile.classList.remove('is-loading');
   tile.classList.add('is-failed');
   tile.disabled = false;
-  tile.setAttribute('aria-label', `${entry.meta.id}, failed — tap to retry`);
+  tile.setAttribute('aria-label', `${entry.meta.id}, ${t('picStateFailed')}`);
   tile.replaceChildren();
   const retry = document.createElement('span');
   retry.className = 'picture-tile-retry';

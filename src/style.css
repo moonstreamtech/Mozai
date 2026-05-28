@@ -991,7 +991,14 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  /*
+   * Horizontal padding only — vertical padding moved to the palette
+   * and banner so the minimap (align-self: stretch) can fill the
+   * strip's full inner height edge-to-edge, touching the top and
+   * bottom dividers. The swatches stay vertically centred via the
+   * palette's own align-items: center.
+   */
+  padding: 0 12px;
   border-top: 1px solid var(--scene-border);
   background: var(--scene-bg);
   min-height: 82px;
@@ -1002,11 +1009,13 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  /* Vertical padding lives here so the swatches don't touch the
+     strip dividers. Horizontal handled by the strip. */
+  padding: 10px 0;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
-  /* Take vertical space inside the strip rather than imposing it. */
   min-width: 0;
 }
 
@@ -1039,6 +1048,9 @@ body {
   justify-content: center;
   gap: 12px;
   padding: 6px 10px;
+  /* Vertical margin matches the palette's vertical padding so the
+     swap doesn't change the strip's height profile. */
+  margin: 10px 0;
   background: linear-gradient(135deg, #fff7e6, #ffffff);
   border: 1px solid var(--scene-fill);
   border-radius: 10px;
@@ -1075,17 +1087,22 @@ body {
 }
 
 /*
- * Minimap, repositioned from the floating top-right of the paint
- * viewport into the bottom strip's right edge. Always visible
- * regardless of zoom (the viewport rectangle on the minimap shrinks
- * / grows; at fit-zoom it just fills the minimap). Square, sized
- * to the strip's inner content height (~62 px = 82 strip - 20
- * padding) so it always fits cleanly next to the palette swatches.
+ * Minimap. Lives in the bottom strip's right edge, always visible
+ * regardless of zoom (the viewport rectangle on the minimap
+ * shrinks / grows; at fit-zoom it just fills the minimap).
+ *
+ * align-self: stretch makes the canvas fill the strip's full
+ * inner content height (top edge touches the viewport divider,
+ * bottom edge touches the AdMob banner reservation). Width is set
+ * to the same value as the strip's min-height so the canvas is
+ * square (height-driven). The actual rendered cell-count in the
+ * canvas adjusts via CSS clientWidth/clientHeight × dpr — the
+ * paint-render layer reads those each frame.
  */
 .paint-minimap {
   flex: 0 0 auto;
-  width: 62px;
-  height: 62px;
+  align-self: stretch;
+  width: 81px;
   display: block;
   background: rgba(255, 255, 255, 0.92);
   border: 1px solid #98a4b4;

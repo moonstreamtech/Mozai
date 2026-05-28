@@ -67,7 +67,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     root.className = 'scene scene-paint';
     root.innerHTML = `
       <header class="paint-topbar">
-        <button class="back-btn" type="button" aria-label="Back to room">
+        <button class="back-btn" type="button" aria-label="${t('backToRoom')}">
           <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
@@ -81,18 +81,18 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       <div class="paint-viewport">
         <canvas class="paint-canvas"></canvas>
         <div class="paint-zoom-controls" aria-hidden="true">
-          <button class="zoom-btn" type="button" data-zoom-out aria-label="Zoom out">−</button>
-          <button class="zoom-btn" type="button" data-zoom-in aria-label="Zoom in">+</button>
+          <button class="zoom-btn" type="button" data-zoom-out aria-label="${t('zoomOut')}">−</button>
+          <button class="zoom-btn" type="button" data-zoom-in aria-label="${t('zoomIn')}">+</button>
         </div>
         <div class="paint-loading" data-loading>${t('loadingPuzzle')}</div>
       </div>
       <div class="paint-bottom-strip">
-        <div class="paint-palette" role="toolbar" aria-label="Colour palette"></div>
+        <div class="paint-palette" role="toolbar" aria-label="${t('colourPalette')}"></div>
         <div class="paint-completion-banner" data-completion hidden>
           <span class="paint-completion-banner-text">${t('completeTitle')}</span>
           <button class="paint-completion-banner-btn" type="button" data-dismiss-complete>${t('done')}</button>
         </div>
-        <canvas class="paint-minimap" data-minimap aria-label="Minimap"></canvas>
+        <canvas class="paint-minimap" data-minimap aria-label="${t('minimap')}"></canvas>
       </div>
     `;
     host.appendChild(root);
@@ -139,9 +139,17 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     // plagued the old centred modal can't reach this button: a
     // paint stroke's pointer is captured by the canvas and never
     // sees the banner.
+    //
+    // "Tamam" now navigates back to the room-interior scene rather
+    // than just dismissing the banner. The 400 ms zoom-to-fit
+    // reveal that ran before the banner appeared has already given
+    // the player the "linger on finished art" beat; from this
+    // moment on, the natural next action is to pick another
+    // picture or see the next room unlock — both happen in the
+    // room scene. Reopening a completed picture later is unchanged
+    // (no banner, no animation, just fit-zoom + "✓ Done" in topbar).
     const onDismissComplete = () => {
-      completionBannerEl.hidden = true;
-      paletteEl.hidden = false;
+      ctx.back();
     };
     completionDismissBtn.addEventListener('click', onDismissComplete);
 
@@ -406,7 +414,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       swatch.type = 'button';
       swatch.className = 'swatch';
       swatch.dataset.idx = String(idx);
-      swatch.setAttribute('aria-label', `Colour ${idx + 1}`);
+      swatch.setAttribute('aria-label', t('colourLabel', { n: idx + 1 }));
       swatch.innerHTML = `
         <span class="swatch-dot" style="background:${state!.puzzle.palette[idx]}"></span>
         <span class="swatch-pct" data-pct>0%</span>

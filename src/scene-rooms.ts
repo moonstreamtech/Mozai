@@ -103,8 +103,8 @@ function buildRoomCell(n: number, ctx: SceneContext): HTMLElement {
   cell.setAttribute(
     'aria-label',
     unlocked
-      ? `Room ${n}, ${done} of ${total} complete (${pct}%)`
-      : `Room ${n} locked. Complete ${n} pictures in room ${n - 1} to unlock.`,
+      ? t('roomCellLabel', { n, done, total, pct })
+      : t('roomCellLocked', { n, prev: n - 1 }),
   );
 
   // Inner DOM order matters for layering: fill must be the first
