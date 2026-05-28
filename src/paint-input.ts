@@ -47,6 +47,16 @@ type ActivePointer = { id: number; x: number; y: number };
 export class PaintInput {
   private readonly deps: PaintInputDeps;
   private readonly pointers = new Map<number, ActivePointer>();
+  /**
+   * Master gate for ALL pointer / wheel input. Set true to make
+   * every handler short-circuit — used by the scene's completion
+   * reveal animation (the camera glides to fit-zoom over a few
+   * hundred ms and the user must not be able to fight the easing
+   * or land an accidental paint mid-transition). Set back to false
+   * once the reveal completes. Direct property; the scene owns the
+   * toggle.
+   */
+  paused = false;
   /** True iff a single-finger paint stroke is in progress. */
   private painting = false;
   /** Cells already attempted during the current stroke (avoid retrying). */
@@ -113,6 +123,7 @@ export class PaintInput {
   }
 
   private handleDown(e: PointerEvent): void {
+    if (this.paused) return;
     const pos = this.getLocalPos(e);
     this.pointers.set(e.pointerId, { id: e.pointerId, x: pos.x, y: pos.y });
     this.deps.canvas.setPointerCapture(e.pointerId);
@@ -144,6 +155,7 @@ export class PaintInput {
   }
 
   private handleMove(e: PointerEvent): void {
+    if (this.paused) return;
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
     const pos = this.getLocalPos(e);
@@ -174,6 +186,10 @@ export class PaintInput {
   }
 
   private handleUp(e: PointerEvent): void {
+    // Note: we deliberately DO NOT bail on `paused` here. If the
+    // user was painting when the scene paused, the existing pointers
+    // must still be cleared on pointerup so they don't get
+    // resurrected when the pause lifts.
     if (!this.pointers.has(e.pointerId)) return;
     this.pointers.delete(e.pointerId);
     try {
@@ -205,6 +221,7 @@ export class PaintInput {
   }
 
   private handleWheel(e: WheelEvent): void {
+    if (this.paused) return;
     e.preventDefault();
     const pos = this.getLocalPos(e);
     // Negative deltaY = scroll up = zoom in (matches Google Maps).
@@ -271,6 +288,7 @@ export class PaintInput {
 
   /** Centre-anchored zoom (for the +/- UI buttons). */
   zoomCentered(factor: number): void {
+    if (this.paused) return;
     const r = this.deps.canvas.getBoundingClientRect();
     this.zoomAround(r.width / 2, r.height / 2, factor);
   }

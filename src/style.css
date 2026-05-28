@@ -797,9 +797,9 @@ body {
    * adaptive banners can reach 90dp+). The flex layout shrinks
    * .paint-viewport by exactly this padding, so the canvas
    * viewport height is now:
-   *   #game.height − .paint-topbar − .paint-palette − banner-reservation
-   * which keeps the palette + Hint + zoom controls fully tappable
-   * above the ad.
+   *   #game.height − .paint-topbar − .paint-bottom-strip − banner
+   * which keeps the palette + minimap + Hint + zoom controls fully
+   * tappable above the ad.
    */
   padding: 0 0 calc(var(--banner-h) + env(safe-area-inset-bottom, 0px)) 0;
 }
@@ -933,41 +933,6 @@ body {
   pointer-events: none;
 }
 
-/*
- * Minimap. Top-right corner under the topbar; shown only when the
- * user is zoomed past fit (scene-paint toggles the `hidden`
- * attribute). 90 CSS px square is large enough to read the picture
- * AND the viewport rectangle on a phone screen without crowding
- * the Hint button. The semi-transparent backdrop lets the canvas
- * underneath still feel like the primary surface.
- *
- * The `[hidden]` rule wins over `display: block` (specificity
- * class+attribute > class alone) — same pattern as
- * .paint-loading[hidden] / .paint-completion[hidden].
- */
-.paint-minimap {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 90px;
-  height: 90px;
-  display: block;
-  z-index: 2;
-  background: rgba(255, 255, 255, 0.92);
-  border: 1px solid #98a4b4;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
-  pointer-events: auto;
-  touch-action: none;
-  -webkit-user-select: none;
-  user-select: none;
-  cursor: pointer;
-}
-
-.paint-minimap[hidden] {
-  display: none;
-}
-
 .zoom-btn {
   width: 40px;
   height: 40px;
@@ -995,19 +960,33 @@ body {
 }
 
 /*
- * Same [hidden]-attribute fix as .paint-completion: `display: flex`
- * above wins over UA's [hidden] { display: none }, so without this
- * rule the JS `loadingEl.hidden = true` toggle has no effect and
- * the "Loading puzzle…" overlay covers the canvas forever — the
- * actual cause of the user-reported "canvas never renders, stuck
- * on Loading" symptom. The attribute selector gives the [hidden]
- * variant higher specificity (class+attr), so this wins.
+ * Same [hidden]-attribute fix as the other `selector[hidden]`
+ * rules: `display: flex` above wins over UA's flat
+ * `[hidden] { display: none }`, so without this rule the JS
+ * `loadingEl.hidden = true` toggle has no effect and the
+ * "Loading puzzle…" overlay covers the canvas forever. The
+ * attribute selector adds one attribute to the class's specificity
+ * so the [hidden] variant wins.
  */
 .paint-loading[hidden] {
   display: none;
 }
 
-.paint-palette {
+/*
+ * Bottom strip below the paint viewport. Three children, source
+ * order = visual order:
+ *   .paint-palette            (left, swatches, scrollable)
+ *   .paint-completion-banner  (left, shown ONLY on completion;
+ *                              mutually exclusive with .paint-palette)
+ *   .paint-minimap            (right, always visible, square)
+ *
+ * Height pinned at min-height 82 px (same value that used to live
+ * on .paint-palette). The pin keeps the .paint-viewport above from
+ * resizing when every swatch is removed at 100 % completion AND
+ * when the palette → completion-banner swap happens at the same
+ * moment — both swaps must NOT translate the finished picture.
+ */
+.paint-bottom-strip {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -1015,24 +994,107 @@ body {
   padding: 10px 12px;
   border-top: 1px solid var(--scene-border);
   background: var(--scene-bg);
+  min-height: 82px;
+}
+
+.paint-palette {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   overflow-x: auto;
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: thin;
-  /*
-   * Reserve the strip's full height even after every swatch has been
-   * removed (at 100% completion). Without this, the .paint-viewport
-   * grows by exactly this much and the renderer re-centres lower.
-   * The natural full-palette content height is:
-   *   .swatch-dot 36 + .swatch internal gap 4 + .swatch-pct ~12
-   *   + .swatch padding (4+4) = 60 px
-   *   + .paint-palette padding (10+10) = 20 px
-   *   + border-top 1 px
-   *   = 81 px
-   * Pin to 82 (1 px headroom against any rounding) so swatch
-   * removal at completion does not change the strip's box.
-   */
-  min-height: 82px;
+  /* Take vertical space inside the strip rather than imposing it. */
+  min-width: 0;
+}
+
+/*
+ * `.paint-palette[hidden] { display: none }` — higher specificity
+ * than the bare class rule, so the JS `paletteEl.hidden = true`
+ * during the completion swap actually takes effect (UA's flat
+ * `[hidden] { display: none }` would lose to `display: flex`
+ * above).
+ */
+.paint-palette[hidden] {
+  display: none;
+}
+
+/*
+ * Completion banner. Lives in the bottom strip's left slot and
+ * mutually excludes the palette: only one is visible at a time.
+ * Sits in the SAME flex band as the (now-empty) palette would, so
+ * the strip's height is stable across the swap and the picture
+ * above doesn't translate.
+ *
+ * `[hidden]` rule has higher specificity than the visible-state
+ * rule below (class + attribute > class alone), so the JS toggle
+ * wins over `display: flex`.
+ */
+.paint-completion-banner {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: linear-gradient(135deg, #fff7e6, #ffffff);
+  border: 1px solid var(--scene-fill);
+  border-radius: 10px;
+  min-width: 0;
+}
+
+.paint-completion-banner[hidden] {
+  display: none;
+}
+
+.paint-completion-banner-text {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 1px;
+  color: var(--scene-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.paint-completion-banner-btn {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  background: var(--scene-fill);
+  color: #2b1810;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+/*
+ * Minimap, repositioned from the floating top-right of the paint
+ * viewport into the bottom strip's right edge. Always visible
+ * regardless of zoom (the viewport rectangle on the minimap shrinks
+ * / grows; at fit-zoom it just fills the minimap). Square, sized
+ * to the strip's inner content height (~62 px = 82 strip - 20
+ * padding) so it always fits cleanly next to the palette swatches.
+ */
+.paint-minimap {
+  flex: 0 0 auto;
+  width: 62px;
+  height: 62px;
+  display: block;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #98a4b4;
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.10);
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  cursor: pointer;
 }
 
 .swatch {
@@ -1120,50 +1182,3 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
-.paint-completion {
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 255, 255, 0.92);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 20;
-}
-
-/*
- * Honour the HTML `hidden` attribute. The UA-stylesheet rule
- * `[hidden] { display: none }` loses to the author rule above
- * (.paint-completion has equal specificity but is later in source,
- * and `display: flex` wins over UA's display: none for `hidden`).
- * Without this rule the completion modal was painting from the
- * moment the scene mounted, REGARDLESS of state.isComplete() —
- * which is the actual bug behind the "Complete! at 0%" reports.
- * `[hidden]` selector adds one attribute to the specificity so it
- * beats the plain class rule above.
- */
-.paint-completion[hidden] {
-  display: none;
-}
-
-.paint-completion-card {
-  background: var(--scene-bg);
-  padding: 24px 28px;
-  border-radius: 16px;
-  text-align: center;
-  border: 1px solid var(--scene-border);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.15);
-  max-width: 280px;
-}
-
-.paint-completion-card h2 {
-  margin: 0 0 8px;
-  font-size: 22px;
-  letter-spacing: 2px;
-  color: var(--scene-ink);
-}
-
-.paint-completion-card p {
-  margin: 0 0 16px;
-  font-size: 13px;
-  color: var(--scene-muted);
-}
