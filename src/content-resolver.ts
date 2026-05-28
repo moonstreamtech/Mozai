@@ -54,6 +54,12 @@ export type ContentSource = 'bundled' | 'cache' | 'network' | 'FAILED';
 export interface ResolveResult {
   /** Raw text payload. Empty string when source === 'FAILED'. */
   text: string;
+  /**
+   * Validator's normalised return value, set only when a validator
+   * was provided AND it returned a non-null value. Callers can
+   * down-cast directly instead of re-parsing the text.
+   */
+  parsed?: unknown;
   source: ContentSource;
 }
 
@@ -98,21 +104,24 @@ function joinUrl(base: string, path: string): string {
 
 export interface ResolveOptions {
   /**
-   * Optional content validator. Runs on the text payload after a
-   * cache hit and after a network fetch, BEFORE the payload is
-   * accepted. Return `true` for valid, `false` to reject.
+   * Optional content validator + normaliser. Runs on the text
+   * payload after a cache hit and after a network fetch.
    *
-   *   • cache-hit + invalid → evict cache entry, fall through to
-   *                            network.
-   *   • network-ok + invalid → do NOT write cache; return FAILED.
+   *   • Returns a non-null value → content is valid. The resolver
+   *     attaches the returned value to `ResolveResult.parsed` so
+   *     callers don't need to re-parse. Typically the value is a
+   *     fully validated AND normalised domain object (e.g. a
+   *     Puzzle with any optional fields back-filled from
+   *     computation).
+   *   • Returns `null` → content is invalid. cache-hit → evict
+   *     entry and fall through to network. network-ok → don't
+   *     write cache, return FAILED.
    *
-   * Bundled paths also run the validator — a corrupt asset is just
-   * as bad as a corrupt CDN response. Callers must supply a
-   * validator wherever a non-JSON or schema-violating body would
-   * be a correctness bug downstream (every puzzle / thumbs caller
-   * does).
+   * The optional `path` argument is the same content path the
+   * caller passed to resolveContent — useful for log messages
+   * inside the validator.
    */
-  validate?: (text: string) => boolean;
+  validate?: (text: string, path: string) => unknown | null;
 }
 
 export async function resolveContent(
@@ -126,7 +135,11 @@ export async function resolveContent(
       const res = await fetch(path, { cache: 'no-store' });
       if (!res.ok) return { text: '', source: 'FAILED' };
       const text = await res.text();
-      if (validate && !validate(text)) return { text: '', source: 'FAILED' };
+      if (validate) {
+        const parsed = validate(text, path);
+        if (parsed === null) return { text: '', source: 'FAILED' };
+        return { text, parsed, source: 'bundled' };
+      }
       return { text, source: 'bundled' };
     } catch {
       return { text: '', source: 'FAILED' };
@@ -137,13 +150,18 @@ export async function resolveContent(
   const cacheKey = stripContentPrefix(path);
   const cached = await readCache(cacheKey);
   if (cached !== null) {
-    if (!validate || validate(cached)) {
+    if (validate) {
+      const parsed = validate(cached, path);
+      if (parsed !== null) {
+        return { text: cached, parsed, source: 'cache' };
+      }
+      // Cache hit but corrupt (interrupted prior write, schema drift,
+      // disk damage). Evict so the next call falls through cleanly,
+      // then continue to the network for THIS call too.
+      await clearCache(cacheKey);
+    } else {
       return { text: cached, source: 'cache' };
     }
-    // Cache hit but corrupt (interrupted prior write, schema drift,
-    // disk damage). Evict so the next call falls through cleanly,
-    // then continue to the network for THIS call too.
-    await clearCache(cacheKey);
   }
 
   // Network from CDN with retry + timeout. A flaky connection
@@ -156,17 +174,22 @@ export async function resolveContent(
   const fetchOutcome = await fetchWithRetry(cdnUrl);
   if (fetchOutcome.kind === 'ok') {
     const text = fetchOutcome.text;
-    if (validate && !validate(text)) {
-      // Server returned a complete but malformed body (e.g. corrupt
-      // upstream, MITM tampering, schema regression). NEVER cache
-      // an invalid payload — that would resurrect the corruption
-      // on every later cache hit. Surface as FAILED so the caller
-      // can show its offline / retry path.
-      return { text: '', source: 'FAILED' };
+    if (validate) {
+      const parsed = validate(text, path);
+      if (parsed === null) {
+        // Server returned a complete but malformed body (e.g. corrupt
+        // upstream, MITM tampering, schema regression). NEVER cache
+        // an invalid payload — that would resurrect the corruption
+        // on every later cache hit. Surface as FAILED so the caller
+        // can show its retry path.
+        return { text: '', source: 'FAILED' };
+      }
+      // Fire-and-forget cache write. The user has the content already;
+      // a write failure (disk full, permission) shouldn't fail the
+      // resolve.
+      writeCache(cacheKey, text).catch(() => {});
+      return { text, parsed, source: 'network' };
     }
-    // Fire-and-forget cache write. The user has the content already;
-    // a write failure (disk full, permission) shouldn't fail the
-    // resolve.
     writeCache(cacheKey, text).catch(() => {});
     return { text, source: 'network' };
   }

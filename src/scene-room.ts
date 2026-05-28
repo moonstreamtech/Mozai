@@ -48,7 +48,7 @@ import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadFilledBitset } from './paint-state.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
-import { ContentResolveError, loadPuzzle } from './content.js';
+import { loadPuzzle } from './content.js';
 import { t } from './i18n.js';
 
 interface PictureState {
@@ -127,17 +127,17 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] thumbs load failed', err);
-        // Distinguish "offline + uncached" (show needs-internet) from
-        // a real data error (show the generic couldNotLoad). Both
-        // get the same Retry button — the resolver will try the
-        // network again on a fresh attempt.
-        const message =
-          err instanceof ContentResolveError
-            ? t('needsInternet')
-            : t('couldNotLoadThumbs', { n: target.roomN });
+        // One generic message for every failure mode — we don't
+        // actually know whether it's offline, a 404, a corrupt
+        // blob, or schema drift, and claiming "internet required"
+        // when the real cause is a stale CDN file misled users
+        // earlier. The Retry button re-runs the resolver, which
+        // handles the actual recovery (re-fetch + re-validate).
+        // Console log above already carries the precise cause for
+        // debugging.
         body.innerHTML = `
           <p class="scene-note scene-error">
-            ${message}<br>
+            ${t('roomLoadFailed')}<br>
             <button class="cta-btn" type="button" data-retry>${t('retry')}</button>
           </p>`;
         body.querySelector<HTMLButtonElement>('[data-retry]')?.addEventListener('click', () => {

@@ -34,54 +34,119 @@ export type ThumbBundle = Record<string, Thumb>;
 const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
 
 /**
- * Validate raw thumbs.json text. Used by loadRoomThumbs and by
- * resolveContent (pre-cache-write / cache-read) so a malformed
- * thumbs blob is detected before it can poison the cache or render.
+ * Validate + normalise raw thumbs.json text. Used by loadRoomThumbs
+ * via the resolver — runs on both cache hits and network responses
+ * so a malformed thumbs blob is detected before it can poison the
+ * cache or render.
  *
- * A bundle is valid iff every entry has:
- *   • positive integer w, h with w === h
- *   • cells.length === w*h
- *   • palette of HEX6_RE strings
- *   • each cell value -1 or 0 ≤ v < palette.length
+ * Same loose-but-safe rule the puzzle validator uses: only the
+ * structurally required fields gate the validation. Each entry
+ * needs positive integer w, h with w === h, a palette of >= 1
+ * #rrggbb strings, and cells of length w*h with values -1 or in
+ * palette range. Partial credit is NOT allowed — a single bad
+ * entry invalidates the whole bundle, since the room scene needs
+ * every thumb to render its tiles.
  *
- * Single bad entry invalidates the whole bundle — partial credit
- * would leave half the room unrendered.
+ * Returns the validated ThumbBundle on success, or null on hard
+ * failure. console.warn's the failing entry + reason + path before
+ * returning null so on-device debugging can tell schema drift
+ * from a network problem.
  */
-export function validateThumbsText(text: string): boolean {
+export function validateThumbsText(text: string, path: string): ThumbBundle | null {
   let obj: unknown;
   try {
     obj = JSON.parse(text);
-  } catch {
-    return false;
+  } catch (err) {
+    warnThumbs(path, 'JSON.parse failed', (err as Error)?.message ?? String(err));
+    return null;
   }
-  if (!obj || typeof obj !== 'object') return false;
+  if (!obj || typeof obj !== 'object') {
+    warnThumbs(path, 'root is not an object');
+    return null;
+  }
   const bundle = obj as Record<string, unknown>;
+  const out: ThumbBundle = {};
   for (const key of Object.keys(bundle)) {
-    if (!validateThumb(bundle[key])) return false;
+    const thumb = validateThumb(bundle[key], path, key);
+    if (!thumb) return null;
+    out[key] = thumb;
   }
-  return true;
+  return out;
 }
 
-function validateThumb(obj: unknown): obj is Thumb {
-  if (!obj || typeof obj !== 'object') return false;
+function validateThumb(obj: unknown, path: string, key: string): Thumb | null {
+  if (!obj || typeof obj !== 'object') {
+    warnThumbs(path, `entry "${key}" is not an object`);
+    return null;
+  }
   const t = obj as Record<string, unknown>;
-  if (typeof t.w !== 'number' || !Number.isInteger(t.w) || t.w <= 0) return false;
-  if (typeof t.h !== 'number' || !Number.isInteger(t.h) || t.h <= 0) return false;
-  if (t.w !== t.h) return false;
-  if (!Array.isArray(t.palette)) return false;
-  for (const c of t.palette) {
-    if (typeof c !== 'string' || !HEX6_RE.test(c)) return false;
+  if (typeof t.w !== 'number' || !Number.isInteger(t.w) || t.w <= 0) {
+    warnThumbs(path, `entry "${key}" w not a positive integer`, String(t.w));
+    return null;
+  }
+  if (typeof t.h !== 'number' || !Number.isInteger(t.h) || t.h <= 0) {
+    warnThumbs(path, `entry "${key}" h not a positive integer`, String(t.h));
+    return null;
+  }
+  if (t.w !== t.h) {
+    warnThumbs(path, `entry "${key}" w (${t.w}) !== h (${t.h})`);
+    return null;
+  }
+  if (!Array.isArray(t.palette)) {
+    warnThumbs(path, `entry "${key}" palette is not an array`);
+    return null;
+  }
+  if (t.palette.length === 0) {
+    warnThumbs(path, `entry "${key}" palette is empty`);
+    return null;
+  }
+  for (let i = 0; i < t.palette.length; i++) {
+    const c = t.palette[i];
+    if (typeof c !== 'string' || !HEX6_RE.test(c)) {
+      warnThumbs(path, `entry "${key}" palette[${i}] not a #rrggbb hex string`, String(c));
+      return null;
+    }
   }
   const paletteLen = t.palette.length;
-  if (paletteLen === 0) return false;
-  if (!Array.isArray(t.cells)) return false;
-  if (t.cells.length !== (t.w as number) * (t.h as number)) return false;
-  for (const v of t.cells) {
-    if (typeof v !== 'number' || !Number.isInteger(v)) return false;
-    if (v === -1) continue;
-    if (v < 0 || v >= paletteLen) return false;
+  if (!Array.isArray(t.cells)) {
+    warnThumbs(path, `entry "${key}" cells is not an array`);
+    return null;
   }
-  return true;
+  if (t.cells.length !== (t.w as number) * (t.h as number)) {
+    warnThumbs(
+      path,
+      `entry "${key}" cells.length (${t.cells.length}) !== w*h (${(t.w as number) * (t.h as number)})`,
+    );
+    return null;
+  }
+  for (let i = 0; i < t.cells.length; i++) {
+    const v = t.cells[i];
+    if (typeof v !== 'number' || !Number.isInteger(v)) {
+      warnThumbs(path, `entry "${key}" cells[${i}] not an integer`, String(v));
+      return null;
+    }
+    if (v === -1) continue;
+    if (v < 0 || v >= paletteLen) {
+      warnThumbs(
+        path,
+        `entry "${key}" cells[${i}] = ${v} out of palette range [0, ${paletteLen})`,
+      );
+      return null;
+    }
+  }
+  return {
+    w: t.w as number,
+    h: t.h as number,
+    palette: t.palette as string[],
+    cells: t.cells as number[],
+  };
+}
+
+function warnThumbs(path: string, reason: string, detail?: string): void {
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[mozai] thumbs validation failed for ${path} — ${reason}${detail ? ` (${detail})` : ''}`,
+  );
 }
 
 const bundleCache = new Map<number, Promise<ThumbBundle>>();
@@ -89,9 +154,10 @@ const bundleCache = new Map<number, Promise<ThumbBundle>>();
 /**
  * Fetch (and cache) a room's thumbs.json. Two callers for the same
  * room share the in-flight promise — no double fetch on rapid
- * back-and-forth navigation. Validated by validateThumbsText at the
- * resolver layer so a corrupt cached blob is evicted instead of
- * served.
+ * back-and-forth navigation. Validated by validateThumbsText at
+ * the resolver layer; the validator's return value is used
+ * directly (no re-parse) and the cache is evicted on validation
+ * failure.
  */
 export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const cached = bundleCache.get(roomN);
@@ -101,10 +167,10 @@ export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   // the scene actually re-runs the resolver.
   const p = resolveContent(path, { validate: validateThumbsText })
     .then((result) => {
-      if (result.source === 'FAILED') {
+      if (result.source === 'FAILED' || !result.parsed) {
         throw new ContentResolveError(path);
       }
-      return JSON.parse(result.text) as ThumbBundle;
+      return result.parsed as ThumbBundle;
     })
     .catch((err) => {
       bundleCache.delete(roomN);
