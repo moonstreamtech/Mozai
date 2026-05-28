@@ -9,15 +9,12 @@
  *   - background cells (-1)               → transparent (RGBA 0,0,0,0)
  *   - filled cells                        → palette[i] RGBA
  *   - unfilled, hint-revealed cells       → silhouette grey RGBA
- *   - unfilled, not hinted                → OPAQUE WHITE — the
- *                                            paintable area reads as
- *                                            a bright "island"
- *                                            covering the centred
- *                                            MOZAI watermark drawn
- *                                            underneath. The
- *                                            watermark therefore
- *                                            only shows through in
- *                                            -1 background cells.
+ *   - unfilled, not hinted                → transparent (the white
+ *                                            canvas background shows
+ *                                            through; gridlines on
+ *                                            top distinguish the
+ *                                            cell from the empty
+ *                                            -1 field)
  *
  * Per-cell updates are O(1) — we poke 4 bytes into the buffer. Per
  * frame is also O(1) on the JS side: one `drawImage(offscreen, ...)`
@@ -27,22 +24,27 @@
  *
  * Frame composition (bottom → top):
  *   1. White fill of the visible canvas.
- *   2. Centred faded MOZAI wordmark — screen-anchored, does NOT
- *      pan or zoom with the grid.
- *   3. Offscreen blit at the camera transform — covers the
- *      watermark on every paintable cell, leaves it visible in
- *      -1 background.
- *   4. Light-grey gridlines on every PAINTABLE cell — keeps cells
- *      legible even when they're white or painted white. Skipped
- *      at pxPerCell < 6 (the lines alias into noise at extreme
- *      zoom-out).
+ *   2. Offscreen blit at the camera transform — paints palette
+ *      colour on filled cells and silhouette grey on hint-revealed
+ *      cells. -1 background and unfilled+no-hint cells stay
+ *      transparent (white shows through).
+ *   3. Light-grey gridlines on every PAINTABLE cell. Skipped at
+ *      pxPerCell < 6 where they alias into noise.
+ *   4. Per-cell faded MOZAI logo tile on every -1 BACKGROUND cell.
+ *      Distinguishes the empty field from paintable cells at a
+ *      glance. Skipped at pxPerCell < BG_LOGO_MIN_PX_PER_CELL where
+ *      the tile is sub-pixel; the cell-colour contrast carries the
+ *      visual at that zoom range.
  *   5. Selection outlines (only when a hint is unlocked).
  *   6. Minimap (when bound).
  *
  * This means a 1000x1000 puzzle stays smooth even at full zoom-out
  * because we never iterate cells in JS during a render — we just
  * blit a 1000x1000 RGBA buffer to a much smaller viewport, which is
- * a single GPU-accelerated operation.
+ * a single GPU-accelerated operation. At zoomed-in views we DO
+ * iterate the visible cell range (typically < 5000 cells) twice
+ * — once for gridlines, once for background logo tiles — both
+ * viewport-bounded, never grid-bounded.
  *
  * Memory: 1000x1000 RGBA = 4 MB for the offscreen. Plus the visible
  * canvas backing store (dpr * cssSize). Cheap on modern phones.
@@ -51,15 +53,73 @@
 import type { PaintState } from './paint-state.js';
 
 /**
- * Opacity of the centred MOZAI watermark drawn on the empty (-1)
- * field. 0.12 keeps it a calm backdrop — easily readable as
- * "this is empty space" without competing with the actual picture
- * for attention. Bump up here if it feels too subtle in practice;
- * nothing else in the renderer references this constant.
+ * Opacity of the per-cell MOZAI app-logo tile drawn on every -1
+ * BACKGROUND cell. 0.15 is enough to clearly read "this is empty
+ * space" without competing with the actual picture. Baked once
+ * into a pre-faded offscreen at icon-load time so the per-frame
+ * path is plain drawImage with no globalAlpha churn. Single
+ * retune knob — bump up or down here.
  */
-const EMPTY_FIELD_LOGO_OPACITY = 0.12;
+const BG_LOGO_OPACITY = 0.15;
+
+/**
+ * Below this many backing pixels per cell the logo tile is
+ * sub-pixel and would just contribute noise. We skip the tile
+ * pass entirely at that zoom; the cells render plain.
+ */
+const BG_LOGO_MIN_PX_PER_CELL = 12;
 
 const SILHOUETTE_RGBA: [number, number, number, number] = [192, 200, 209, 255];
+
+// -------- Module-shared background-logo loader --------
+//
+// One image, one pre-faded offscreen canvas, shared by every
+// PaintRenderer in the session. Loaded lazily on first use; while
+// loading, callers register a callback (typically scheduleFrame)
+// so they redraw once the asset is ready. A load failure leaves
+// bgLogoFaded null and drawBackgroundLogos quietly no-ops — the
+// tile is decorative, NOT load-bearing for gameplay.
+
+let bgLogoFaded: HTMLCanvasElement | null = null;
+let bgLogoLoadStarted = false;
+const bgLogoOnLoadCallbacks: Array<() => void> = [];
+
+function getBackgroundLogo(onLoad: () => void): HTMLCanvasElement | null {
+  if (bgLogoFaded) return bgLogoFaded;
+  bgLogoOnLoadCallbacks.push(onLoad);
+  if (bgLogoLoadStarted) return null;
+  bgLogoLoadStarted = true;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const cx = c.getContext('2d');
+    if (cx) {
+      // Bake the alpha in once. Subsequent per-cell drawImage calls
+      // can stay alpha-state-clean — important for the per-frame
+      // visible-cell loop on huge grids.
+      cx.globalAlpha = BG_LOGO_OPACITY;
+      cx.drawImage(img, 0, 0);
+      bgLogoFaded = c;
+    }
+    // Wake every renderer that was waiting.
+    const cbs = bgLogoOnLoadCallbacks.splice(0);
+    for (const cb of cbs) cb();
+  };
+  img.onerror = () => {
+    // Stay un-loaded; tile pass becomes a no-op forever for this
+    // session. Decorative loss only.
+    bgLogoLoadStarted = false;
+  };
+  // Resolve relative to the document so the path works under both
+  // the Vite dev server (root) and the Capacitor WebView origin
+  // (https://localhost/). Vite copies public/mozai-icon.png to
+  // dist/mozai-icon.png; Capacitor serves dist/ from the WebView
+  // root, so the same URL works in production.
+  img.src = new URL('mozai-icon.png', location.href).href;
+  return null;
+}
 
 export interface Camera {
   /** Top-left visible cell coords (float — sub-cell pan is allowed). */
@@ -153,15 +213,15 @@ export class PaintRenderer {
         data[p + 2] = SILHOUETTE_RGBA[2];
         data[p + 3] = SILHOUETTE_RGBA[3];
       } else {
-        // Unfilled, not hinted — OPAQUE WHITE so the paintable area
-        // forms a bright island covering the centred MOZAI
-        // watermark. Critically NOT transparent: that would let the
-        // watermark leak through every unpainted cell and turn the
-        // shape into a noisy hashmark of brand text.
-        data[p] = 255;
-        data[p + 1] = 255;
-        data[p + 2] = 255;
-        data[p + 3] = 255;
+        // Unfilled, not hinted — transparent. The white canvas
+        // background shows through; gridlines on top of the visible
+        // canvas distinguish each cell. Per-cell background-logo
+        // tiles (drawn over -1 cells only) make the empty field
+        // visibly different from this paintable-but-empty state.
+        data[p] = 0;
+        data[p + 1] = 0;
+        data[p + 2] = 0;
+        data[p + 3] = 0;
       }
     }
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0);
@@ -278,14 +338,16 @@ export class PaintRenderer {
    *
    * Layer order (bottom → top):
    *   1. White background.
-   *   2. Centred MOZAI watermark — screen-anchored, does NOT pan
-   *      or zoom with the grid.
-   *   3. Offscreen blit — covers the watermark on every paintable
-   *      cell (now opaque) and leaves it visible on -1 background.
-   *   4. Gridlines on EVERY paintable cell. Drawn AFTER the blit so
+   *   2. Offscreen blit — fills paintable cells; -1 and unfilled+no-
+   *      hint cells stay transparent so the white shows through.
+   *   3. Gridlines on EVERY paintable cell. Drawn AFTER the blit so
    *      filled cells get a visible hairline border too — critical
    *      when cells are white or painted white. Skipped at
    *      pxPerCell < 6 where the lines alias into noise.
+   *   4. Per-cell faded MOZAI logo tile on every -1 cell. The same
+   *      viewport-bounded loop the gridlines use; skipped at
+   *      pxPerCell < BG_LOGO_MIN_PX_PER_CELL where the tile is
+   *      sub-pixel.
    *   5. Selection outlines (only when a hint is unlocked).
    *   6. Minimap.
    */
@@ -303,11 +365,6 @@ export class PaintRenderer {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, bsW, bsH);
 
-    // Watermark sits UNDER the cells blit. The blit's opaque
-    // paintable cells cover it; only -1 background lets it show
-    // through, exactly the "empty branded field" affordance.
-    this.drawEmptyFieldLogo(bsW, bsH);
-
     ctx.imageSmoothingEnabled = false;
 
     const pxPerCell = camera.zoom * dpr;
@@ -318,6 +375,7 @@ export class PaintRenderer {
 
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
     this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
+    this.drawBackgroundLogos(bsW, bsH, pxPerCell, dstX, dstY);
     this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
 
     this.drawMinimap();
@@ -326,41 +384,52 @@ export class PaintRenderer {
   }
 
   /**
-   * Screen-anchored "MOZAI" wordmark drawn once per frame at the
-   * centre of the visible canvas. Scales to a fraction of the
-   * smaller viewport dimension and auto-shrinks if it would
-   * overflow horizontally on a narrow viewport. The wordmark itself
-   * is one fillText call — cost independent of grid size.
+   * Faded MOZAI app-logo drawn into every visible -1 BACKGROUND
+   * cell so the empty field reads as visibly different from a
+   * white paintable cell. The faded variant is pre-baked once at
+   * icon-load time, so this loop is just per-cell drawImage with
+   * no alpha-state changes.
+   *
+   * Performance gates (in the order they short-circuit):
+   *   • pxPerCell < BG_LOGO_MIN_PX_PER_CELL → sub-pixel rendering
+   *     would be invisible AND would dominate the frame on huge
+   *     grids; skip entirely.
+   *   • logo asset not yet loaded → register a redraw callback and
+   *     no-op for this frame.
+   *   • iteration is bounded by the VISIBLE cell range, never the
+   *     full grid: a 1000×1000 puzzle at zoom 12 still touches
+   *     only ~viewport_w/12 × viewport_h/12 cells per frame.
    */
-  private drawEmptyFieldLogo(bsW: number, bsH: number): void {
-    const ctx = this.ctx;
-    const cx = bsW / 2;
-    const cy = bsH / 2;
-    // Target height ~26 % of the smaller viewport dimension. Big
-    // enough to read as a backdrop, small enough not to compete
-    // with the actual picture when fully zoomed out.
-    const target = Math.min(bsW, bsH) * 0.26;
-    ctx.save();
-    ctx.globalAlpha = EMPTY_FIELD_LOGO_OPACITY;
-    ctx.fillStyle = '#324259';
-    const fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif';
-    ctx.font = `900 ${Math.round(target)}px ${fontFamily}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    // Manual letter spacing via spaces — Canvas2D's letterSpacing
-    // property isn't reliably present on the Chrome 92 WebView.
-    const text = 'M O Z A I';
-    // Shrink if the rendered text would extend past ~75% of the
-    // viewport width. Tall narrow viewports (portrait phone vs a
-    // wide puzzle) would otherwise overflow.
-    const maxWidth = bsW * 0.75;
-    const measured = ctx.measureText(text).width;
-    if (measured > maxWidth) {
-      const scaled = target * (maxWidth / measured);
-      ctx.font = `900 ${Math.round(scaled)}px ${fontFamily}`;
+  private drawBackgroundLogos(
+    bsW: number,
+    bsH: number,
+    pxPerCell: number,
+    dstX: number,
+    dstY: number,
+  ): void {
+    if (pxPerCell < BG_LOGO_MIN_PX_PER_CELL) return;
+    const logo = getBackgroundLogo(() => this.scheduleFrame());
+    if (!logo) return;
+
+    const { ctx, state, camera } = this;
+    const puzzleW = state.puzzle.w;
+    const puzzleH = state.puzzle.h;
+    const cellsAcross = bsW / pxPerCell;
+    const cellsDown = bsH / pxPerCell;
+    const cx0 = Math.max(0, Math.floor(camera.offsetX));
+    const cx1 = Math.min(puzzleW, Math.ceil(camera.offsetX + cellsAcross) + 1);
+    const cy0 = Math.max(0, Math.floor(camera.offsetY));
+    const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
+    const sz = Math.round(pxPerCell);
+    for (let cy = cy0; cy < cy1; cy++) {
+      const py = Math.round(dstY + cy * pxPerCell);
+      const rowBase = cy * puzzleW;
+      for (let cx = cx0; cx < cx1; cx++) {
+        if (state.solution[rowBase + cx] !== -1) continue;
+        const px = Math.round(dstX + cx * pxPerCell);
+        ctx.drawImage(logo, px, py, sz, sz);
+      }
     }
-    ctx.fillText(text, cx, cy);
-    ctx.restore();
   }
 
   /**
