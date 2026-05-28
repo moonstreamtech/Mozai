@@ -18,6 +18,24 @@
  * scene and re-mounts the previous target. Re-mounting (rather than
  * resume / suspend) means the room-select grid always shows fresh
  * progress % after returning from a paint session.
+ *
+ * --- THE NAVIGATION RULE ---
+ *
+ * EVERY user navigation in or out of a scene is exactly ONE push,
+ * replace, or back. Scenes do NOT chain their own back, and they
+ * do NOT push the same target they're already on. This guarantees
+ * that one Android back-button press always pops exactly one level.
+ *
+ * Concretely:
+ *   • Entering a new scene → push.
+ *   • Skipping the current scene as you go forward (e.g. preview →
+ *     paint, where back from paint should land on the room, not
+ *     the preview) → replace.
+ *   • Retrying a failed mount of the SAME scene → replace (NOT
+ *     push — pushing the same scene grows the history stack and
+ *     each back tap then only undoes one retry).
+ *   • Backing out (back button, hardware back, completion "Tamam"
+ *     button) → back.
  */
 
 import type { ContentIndex, PuzzleMeta } from './content.js';

@@ -51,15 +51,37 @@ import { readCache, writeCache, clearCache } from './content-cache.js';
 
 export type ContentSource = 'bundled' | 'cache' | 'network' | 'FAILED';
 
+/**
+ * Discriminated union returned by content validators. On success
+ * the validator returns `{ ok: true, value }`; on failure it
+ * returns `{ ok: false, reason }` where `reason` is a short
+ * snake-case token with a namespace prefix (`validation:cells_length`,
+ * `validation:bad_palette_entry`, etc.). The reason flows through
+ * to the resolver and surfaces in the on-device error UI so a
+ * device-side debug session can see the actual cause without
+ * needing the removed debug overlay back.
+ */
+export type ValidatorResult<T = unknown> =
+  | { ok: true; value: T }
+  | { ok: false; reason: string };
+
 export interface ResolveResult {
   /** Raw text payload. Empty string when source === 'FAILED'. */
   text: string;
   /**
    * Validator's normalised return value, set only when a validator
-   * was provided AND it returned a non-null value. Callers can
-   * down-cast directly instead of re-parsing the text.
+   * was provided AND it returned ok. Callers can down-cast directly
+   * instead of re-parsing the text.
    */
   parsed?: unknown;
+  /**
+   * Short snake-case failure code (e.g. `validation:cells_length`,
+   * `network:404`, `network:abort`, `bundled:missing`). Set only
+   * when `source === 'FAILED'`. The room scene appends this to the
+   * localised error message so a device-side debug session can see
+   * the precise cause.
+   */
+  reason?: string;
   source: ContentSource;
 }
 
@@ -107,21 +129,19 @@ export interface ResolveOptions {
    * Optional content validator + normaliser. Runs on the text
    * payload after a cache hit and after a network fetch.
    *
-   *   • Returns a non-null value → content is valid. The resolver
-   *     attaches the returned value to `ResolveResult.parsed` so
-   *     callers don't need to re-parse. Typically the value is a
-   *     fully validated AND normalised domain object (e.g. a
-   *     Puzzle with any optional fields back-filled from
-   *     computation).
-   *   • Returns `null` → content is invalid. cache-hit → evict
-   *     entry and fall through to network. network-ok → don't
-   *     write cache, return FAILED.
+   *   • Returns `{ ok: true, value }` → content is valid. The
+   *     resolver attaches `value` to `ResolveResult.parsed` so
+   *     callers don't need to re-parse.
+   *   • Returns `{ ok: false, reason }` → content is invalid.
+   *     cache-hit → evict entry and fall through to network.
+   *     network-ok → don't write cache, return FAILED with the
+   *     reason propagated to ResolveResult.reason.
    *
-   * The optional `path` argument is the same content path the
-   * caller passed to resolveContent — useful for log messages
-   * inside the validator.
+   * The `path` argument is the same content path the caller passed
+   * to resolveContent — useful for log messages inside the
+   * validator.
    */
-  validate?: (text: string, path: string) => unknown | null;
+  validate?: (text: string, path: string) => ValidatorResult;
 }
 
 export async function resolveContent(
@@ -133,16 +153,16 @@ export async function resolveContent(
   if (isBundledPath(path)) {
     try {
       const res = await fetch(path, { cache: 'no-store' });
-      if (!res.ok) return { text: '', source: 'FAILED' };
+      if (!res.ok) return { text: '', source: 'FAILED', reason: `bundled:${res.status}` };
       const text = await res.text();
       if (validate) {
-        const parsed = validate(text, path);
-        if (parsed === null) return { text: '', source: 'FAILED' };
-        return { text, parsed, source: 'bundled' };
+        const r = validate(text, path);
+        if (!r.ok) return { text: '', source: 'FAILED', reason: r.reason };
+        return { text, parsed: r.value, source: 'bundled' };
       }
       return { text, source: 'bundled' };
-    } catch {
-      return { text: '', source: 'FAILED' };
+    } catch (err) {
+      return { text: '', source: 'FAILED', reason: `bundled:throw:${(err as Error)?.message ?? String(err)}` };
     }
   }
 
@@ -151,13 +171,15 @@ export async function resolveContent(
   const cached = await readCache(cacheKey);
   if (cached !== null) {
     if (validate) {
-      const parsed = validate(cached, path);
-      if (parsed !== null) {
-        return { text: cached, parsed, source: 'cache' };
+      const r = validate(cached, path);
+      if (r.ok) {
+        return { text: cached, parsed: r.value, source: 'cache' };
       }
       // Cache hit but corrupt (interrupted prior write, schema drift,
       // disk damage). Evict so the next call falls through cleanly,
-      // then continue to the network for THIS call too.
+      // then continue to the network for THIS call too. We DON'T
+      // surface the cache reason — if the network then succeeds the
+      // user sees content; if it fails they see the network reason.
       await clearCache(cacheKey);
     } else {
       return { text: cached, source: 'cache' };
@@ -175,25 +197,24 @@ export async function resolveContent(
   if (fetchOutcome.kind === 'ok') {
     const text = fetchOutcome.text;
     if (validate) {
-      const parsed = validate(text, path);
-      if (parsed === null) {
-        // Server returned a complete but malformed body (e.g. corrupt
-        // upstream, MITM tampering, schema regression). NEVER cache
+      const r = validate(text, path);
+      if (!r.ok) {
+        // Server returned a complete but malformed body. NEVER cache
         // an invalid payload — that would resurrect the corruption
-        // on every later cache hit. Surface as FAILED so the caller
-        // can show its retry path.
-        return { text: '', source: 'FAILED' };
+        // on every later cache hit. Surface the reason so the
+        // device error UI can show it.
+        return { text: '', source: 'FAILED', reason: r.reason };
       }
       // Fire-and-forget cache write. The user has the content already;
       // a write failure (disk full, permission) shouldn't fail the
       // resolve.
       writeCache(cacheKey, text).catch(() => {});
-      return { text, parsed, source: 'network' };
+      return { text, parsed: r.value, source: 'network' };
     }
     writeCache(cacheKey, text).catch(() => {});
     return { text, source: 'network' };
   }
-  return { text: '', source: 'FAILED' };
+  return { text: '', source: 'FAILED', reason: fetchOutcome.reason };
 }
 
 type FetchOutcome =
@@ -208,7 +229,12 @@ type FetchOutcome =
  * as a FAILED resolve.
  */
 async function fetchWithRetry(url: string): Promise<FetchOutcome> {
-  let lastReason = 'unknown';
+  // Reasons are normalised to `network:<token>` so the room UI
+  // gets a compact diagnostic string instead of a free-form
+  // English error message. `lastReason` holds whichever code we
+  // most recently encountered; we return it after the retry loop
+  // gives up.
+  let lastReason = 'network:unknown';
   for (let k = 1; k <= MAX_ATTEMPTS; k++) {
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
@@ -234,7 +260,7 @@ async function fetchWithRetry(url: string): Promise<FetchOutcome> {
           if (Number.isFinite(expected)) {
             const actual = new TextEncoder().encode(text).length;
             if (actual !== expected) {
-              lastReason = `truncated body: got ${actual} bytes, expected ${expected}`;
+              lastReason = `network:truncated:${actual}/${expected}`;
               transientFailure = true;
             }
           }
@@ -244,27 +270,26 @@ async function fetchWithRetry(url: string): Promise<FetchOutcome> {
         }
       } else {
         // 4xx (except 408 request-timeout, 429 too-many-requests) is
-        // definitive — return without further retry. The caller will
-        // surface this as offline / FAILED.
+        // definitive — return without further retry.
         const transient = res.status >= 500 || res.status === 408 || res.status === 429;
         if (!transient) {
-          return { kind: 'failed', reason: `status ${res.status}` };
+          return { kind: 'failed', reason: `network:${res.status}` };
         }
-        lastReason = `status ${res.status}`;
+        lastReason = `network:${res.status}`;
       }
     } catch (err) {
       clearTimeout(timeoutId);
-      // AbortError, "Failed to fetch", and other network errors all
-      // land here. Treat them all as transient — they're exactly
-      // the case the retry loop exists for.
-      lastReason = (err as Error)?.message ?? String(err);
+      // AbortError = our per-attempt timeout; "Failed to fetch"
+      // and other network errors collapse to `network:offline`.
+      const name = (err as Error)?.name;
+      lastReason = name === 'AbortError' ? 'network:timeout' : 'network:offline';
     }
     if (k < MAX_ATTEMPTS) {
       const wait = BACKOFF_BASE_MS * (1 << (k - 1)); // 500, 1000, 2000
       await sleep(wait);
     }
   }
-  return { kind: 'failed', reason: `${lastReason} after ${MAX_ATTEMPTS} attempts` };
+  return { kind: 'failed', reason: lastReason };
 }
 
 function sleep(ms: number): Promise<void> {

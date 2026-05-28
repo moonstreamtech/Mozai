@@ -31,7 +31,7 @@
  */
 
 import type { PaintTarget, SceneContext, SceneMount } from './scenes.js';
-import { loadPuzzle } from './content.js';
+import { ContentResolveError, loadPuzzle } from './content.js';
 import { markCompleted } from './progress.js';
 import { PaintState } from './paint-state.js';
 import { PaintRenderer, type CameraLimits } from './paint-render.js';
@@ -314,17 +314,25 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] loadPuzzle failed', err);
-        // Single neutral message for every failure mode (offline,
-        // 404, schema drift, parse error, …). The precise cause is
-        // in the console.error above + the validator's own warnings.
+        // Localised message stays primary; the resolver's reason
+        // code goes on a smaller sub-line so a device-side debug
+        // session can see the precise cause without the removed
+        // debug overlay. Reason codes are NOT translated — they're
+        // compact diagnostic tokens (`validation:cells_length_mismatch`,
+        // `network:404`, …), not user-facing copy.
+        const reason = err instanceof ContentResolveError ? err.reason : 'unknown';
         loadingEl.innerHTML = `
           ${t('couldNotLoadPuzzle', { id: pictureTitle(meta) })}<br>
+          <span class="scene-error-reason">${escapeHtml(`${reason} (${meta.id})`)}</span><br>
           <button class="cta-btn" type="button" data-paint-retry>${t('retry')}</button>
         `;
         loadingEl.classList.add('scene-error');
         loadingEl.querySelector<HTMLButtonElement>('[data-paint-retry]')?.addEventListener(
           'click',
-          () => ctx.push({ scene: 'paint', meta }),
+          // Re-mount via REPLACE: a failed retry must not grow the
+          // history stack — otherwise each tap adds a back-press the
+          // user has to undo.
+          () => ctx.replace({ scene: 'paint', meta }),
         );
       });
 
@@ -675,4 +683,11 @@ function showToast(scene: HTMLElement, message: string): void {
 
 function doBack(ctx: SceneContext): void {
   ctx.back();
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

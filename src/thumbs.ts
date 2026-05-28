@@ -18,7 +18,7 @@
  * the caller has chosen (typically CSS width × dpr).
  */
 
-import { resolveContent } from './content-resolver.js';
+import { resolveContent, type ValidatorResult } from './content-resolver.js';
 import { ContentResolveError } from './content.js';
 
 export interface Thumb {
@@ -52,101 +52,87 @@ const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
  * returning null so on-device debugging can tell schema drift
  * from a network problem.
  */
-export function validateThumbsText(text: string, path: string): ThumbBundle | null {
+export function validateThumbsText(text: string, path: string): ValidatorResult<ThumbBundle> {
   let obj: unknown;
   try {
     obj = JSON.parse(text);
   } catch (err) {
-    warnThumbs(path, 'JSON.parse failed', (err as Error)?.message ?? String(err));
-    return null;
+    return failT(path, 'validation:json_parse', (err as Error)?.message ?? String(err));
   }
   if (!obj || typeof obj !== 'object') {
-    warnThumbs(path, 'root is not an object');
-    return null;
+    return failT(path, 'validation:not_object');
   }
   const bundle = obj as Record<string, unknown>;
   const out: ThumbBundle = {};
   for (const key of Object.keys(bundle)) {
-    const thumb = validateThumb(bundle[key], path, key);
-    if (!thumb) return null;
-    out[key] = thumb;
+    const r = validateThumb(bundle[key], path, key);
+    if (!r.ok) return r;
+    out[key] = r.value;
   }
-  return out;
+  return { ok: true, value: out };
 }
 
-function validateThumb(obj: unknown, path: string, key: string): Thumb | null {
+function validateThumb(obj: unknown, path: string, key: string): ValidatorResult<Thumb> {
   if (!obj || typeof obj !== 'object') {
-    warnThumbs(path, `entry "${key}" is not an object`);
-    return null;
+    return failT(path, 'validation:thumb_not_object', key);
   }
   const t = obj as Record<string, unknown>;
   if (typeof t.w !== 'number' || !Number.isInteger(t.w) || t.w <= 0) {
-    warnThumbs(path, `entry "${key}" w not a positive integer`, String(t.w));
-    return null;
+    return failT(path, 'validation:bad_w', `${key} ${String(t.w)}`);
   }
   if (typeof t.h !== 'number' || !Number.isInteger(t.h) || t.h <= 0) {
-    warnThumbs(path, `entry "${key}" h not a positive integer`, String(t.h));
-    return null;
+    return failT(path, 'validation:bad_h', `${key} ${String(t.h)}`);
   }
   if (t.w !== t.h) {
-    warnThumbs(path, `entry "${key}" w (${t.w}) !== h (${t.h})`);
-    return null;
+    return failT(path, 'validation:w_neq_h', `${key} ${t.w}!=${t.h}`);
   }
   if (!Array.isArray(t.palette)) {
-    warnThumbs(path, `entry "${key}" palette is not an array`);
-    return null;
+    return failT(path, 'validation:no_palette', key);
   }
   if (t.palette.length === 0) {
-    warnThumbs(path, `entry "${key}" palette is empty`);
-    return null;
+    return failT(path, 'validation:empty_palette', key);
   }
   for (let i = 0; i < t.palette.length; i++) {
     const c = t.palette[i];
     if (typeof c !== 'string' || !HEX6_RE.test(c)) {
-      warnThumbs(path, `entry "${key}" palette[${i}] not a #rrggbb hex string`, String(c));
-      return null;
+      return failT(path, 'validation:bad_palette_entry', `${key}[${i}]=${String(c)}`);
     }
   }
   const paletteLen = t.palette.length;
   if (!Array.isArray(t.cells)) {
-    warnThumbs(path, `entry "${key}" cells is not an array`);
-    return null;
+    return failT(path, 'validation:no_cells', key);
   }
-  if (t.cells.length !== (t.w as number) * (t.h as number)) {
-    warnThumbs(
-      path,
-      `entry "${key}" cells.length (${t.cells.length}) !== w*h (${(t.w as number) * (t.h as number)})`,
-    );
-    return null;
+  const expected = (t.w as number) * (t.h as number);
+  if (t.cells.length !== expected) {
+    return failT(path, 'validation:cells_length_mismatch', `${key} ${t.cells.length}!=${expected}`);
   }
   for (let i = 0; i < t.cells.length; i++) {
     const v = t.cells[i];
     if (typeof v !== 'number' || !Number.isInteger(v)) {
-      warnThumbs(path, `entry "${key}" cells[${i}] not an integer`, String(v));
-      return null;
+      return failT(path, 'validation:bad_cell_value', `${key}[${i}]=${String(v)}`);
     }
     if (v === -1) continue;
     if (v < 0 || v >= paletteLen) {
-      warnThumbs(
-        path,
-        `entry "${key}" cells[${i}] = ${v} out of palette range [0, ${paletteLen})`,
-      );
-      return null;
+      return failT(path, 'validation:cell_out_of_range', `${key}[${i}]=${v} palette=${paletteLen}`);
     }
   }
   return {
-    w: t.w as number,
-    h: t.h as number,
-    palette: t.palette as string[],
-    cells: t.cells as number[],
+    ok: true,
+    value: {
+      w: t.w as number,
+      h: t.h as number,
+      palette: t.palette as string[],
+      cells: t.cells as number[],
+    },
   };
 }
 
-function warnThumbs(path: string, reason: string, detail?: string): void {
+function failT(path: string, reason: string, detail?: string): ValidatorResult<never> {
   // eslint-disable-next-line no-console
   console.warn(
     `[mozai] thumbs validation failed for ${path} — ${reason}${detail ? ` (${detail})` : ''}`,
   );
+  return { ok: false, reason };
 }
 
 const bundleCache = new Map<number, Promise<ThumbBundle>>();
@@ -168,7 +154,7 @@ export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const p = resolveContent(path, { validate: validateThumbsText })
     .then((result) => {
       if (result.source === 'FAILED' || !result.parsed) {
-        throw new ContentResolveError(path);
+        throw new ContentResolveError(path, result.reason ?? 'unknown');
       }
       return result.parsed as ThumbBundle;
     })

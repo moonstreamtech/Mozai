@@ -48,7 +48,7 @@ import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadFilledBitset } from './paint-state.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
-import { loadPuzzle } from './content.js';
+import { ContentResolveError, loadPuzzle } from './content.js';
 import { t } from './i18n.js';
 
 interface PictureState {
@@ -127,22 +127,29 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] thumbs load failed', err);
-        // One generic message for every failure mode — we don't
-        // actually know whether it's offline, a 404, a corrupt
-        // blob, or schema drift, and claiming "internet required"
-        // when the real cause is a stale CDN file misled users
-        // earlier. The Retry button re-runs the resolver, which
-        // handles the actual recovery (re-fetch + re-validate).
-        // Console log above already carries the precise cause for
-        // debugging.
+        // The localised message stays the primary readable line.
+        // Below it, on a smaller / lighter sub-line, we show the
+        // resolver's reason code + the failing file basename so a
+        // device-side debug session can see WHAT actually went
+        // wrong (network:404, validation:cells_length_mismatch, …)
+        // without needing the removed debug overlay back. The
+        // reason code is intentionally NOT translated — it's a
+        // compact diagnostic token, not user-facing copy.
+        const reason = err instanceof ContentResolveError ? err.reason : 'unknown';
+        const basename = err instanceof ContentResolveError ? fileBasename(err.path) : '';
+        const detail = basename ? `${reason} (${basename})` : reason;
         body.innerHTML = `
           <p class="scene-note scene-error">
             ${t('roomLoadFailed')}<br>
+            <span class="scene-error-reason">${escapeHtml(detail)}</span><br>
             <button class="cta-btn" type="button" data-retry>${t('retry')}</button>
           </p>`;
         body.querySelector<HTMLButtonElement>('[data-retry]')?.addEventListener('click', () => {
-          // Re-mount the scene by routing forward to the same target.
-          ctx.push({ scene: 'room', roomN: target.roomN });
+          // Re-mount via REPLACE, not PUSH: a failed retry must not
+          // grow the history stack. The previous push-based form
+          // turned every retry tap into another "back" press the
+          // user later had to undo to leave the room.
+          ctx.replace({ scene: 'room', roomN: target.roomN });
         });
       });
 
@@ -359,4 +366,23 @@ function paintTileCanvas(canvas: HTMLCanvasElement, entry: TileEntry): void {
     sourceW: entry.meta.w,
     sourceH: entry.meta.h,
   });
+}
+
+/**
+ * `content/roomN/r2-001.json` → `r2-001`. Used to include the
+ * specific failing file in the on-device error sub-line so a
+ * load failure is traceable without the debug overlay.
+ */
+function fileBasename(path: string): string {
+  const slash = path.lastIndexOf('/');
+  const tail = slash >= 0 ? path.slice(slash + 1) : path;
+  const dot = tail.lastIndexOf('.');
+  return dot > 0 ? tail.slice(0, dot) : tail;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

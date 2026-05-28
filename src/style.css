@@ -610,6 +610,22 @@ body {
 }
 
 /*
+ * Diagnostic sub-line under a load-failure message. Renders the
+ * resolver's reason code + failing file basename so a device-side
+ * debug session can see what actually went wrong. Smaller +
+ * lighter so the localised primary message stays the readable one.
+ */
+.scene-error-reason {
+  display: inline-block;
+  margin-top: 4px;
+  font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: #8a3a3a;
+  opacity: 0.75;
+  letter-spacing: 0.3px;
+  word-break: break-all;
+}
+
+/*
  * Picture-tile loading / failed states. Sequential per-puzzle loader
  * in scene-room.ts transitions each tile LOADING → READY (thumb
  * painted) or LOADING → FAILED (retry glyph, tap to retry just that

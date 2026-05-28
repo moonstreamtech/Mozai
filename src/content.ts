@@ -19,7 +19,7 @@
  * vs a truly-corrupt-cache scenario) misled users.
  */
 
-import { resolveContent } from './content-resolver.js';
+import { resolveContent, type ValidatorResult } from './content-resolver.js';
 
 export interface PuzzleMeta {
   id: string;
@@ -53,18 +53,27 @@ export interface Puzzle {
  * Thrown when the resolver could not produce content for a path —
  * cache miss + network failure for rooms 2+, validation failure on
  * a fetched body, or a missing bundled file for room 1 /
- * index.json. Scenes catch this and surface the neutral
- * `roomLoadFailed` message + Retry. The precise cause is logged
- * to console (validator warnings, network errors) for debugging;
- * we no longer attempt to distinguish "offline" from "schema
- * drift" in the user-facing copy.
+ * index.json.
+ *
+ * Carries both:
+ *   • `path`   — full content path the loader tried
+ *   • `reason` — short snake-case code from the resolver
+ *                 (e.g. `validation:cells_length_mismatch`,
+ *                  `network:404`, `network:timeout`)
+ *
+ * Scenes catch this and surface the neutral `roomLoadFailed`
+ * message + the reason code in a smaller sub-line, so a
+ * device-side debug session can see the precise cause without
+ * needing the removed debug overlay back.
  */
 export class ContentResolveError extends Error {
   readonly path: string;
-  constructor(path: string) {
-    super(`Content unavailable: ${path}`);
+  readonly reason: string;
+  constructor(path: string, reason: string) {
+    super(`Content unavailable: ${path} (${reason})`);
     this.name = 'ContentResolveError';
     this.path = path;
+    this.reason = reason;
   }
 }
 
@@ -106,60 +115,50 @@ const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
  * the file path so a follow-up on-device debug session can tell
  * "network" from "content schema" at a glance.
  */
-export function validatePuzzleText(text: string, path: string): Puzzle | null {
+export function validatePuzzleText(text: string, path: string): ValidatorResult<Puzzle> {
   let obj: unknown;
   try {
     obj = JSON.parse(text);
   } catch (err) {
-    warn(path, 'JSON.parse failed', (err as Error)?.message ?? String(err));
-    return null;
+    return fail(path, 'validation:json_parse', (err as Error)?.message ?? String(err));
   }
   if (!obj || typeof obj !== 'object') {
-    warn(path, 'root is not an object');
-    return null;
+    return fail(path, 'validation:not_object');
   }
   const p = obj as Record<string, unknown>;
 
   const w = p.w;
   const h = p.h;
   if (typeof w !== 'number' || !Number.isInteger(w) || w <= 0) {
-    warn(path, 'w is not a positive integer', String(w));
-    return null;
+    return fail(path, 'validation:bad_w', String(w));
   }
   if (typeof h !== 'number' || !Number.isInteger(h) || h <= 0) {
-    warn(path, 'h is not a positive integer', String(h));
-    return null;
+    return fail(path, 'validation:bad_h', String(h));
   }
   if (w !== h) {
-    warn(path, `w (${w}) !== h (${h})`);
-    return null;
+    return fail(path, 'validation:w_neq_h', `${w}!=${h}`);
   }
 
   if (!Array.isArray(p.palette)) {
-    warn(path, 'palette is not an array');
-    return null;
+    return fail(path, 'validation:no_palette');
   }
   if (p.palette.length === 0) {
-    warn(path, 'palette is empty');
-    return null;
+    return fail(path, 'validation:empty_palette');
   }
   for (let i = 0; i < p.palette.length; i++) {
     const c = p.palette[i];
     if (typeof c !== 'string' || !HEX6_RE.test(c)) {
-      warn(path, `palette[${i}] is not a #rrggbb hex string`, String(c));
-      return null;
+      return fail(path, 'validation:bad_palette_entry', `[${i}]=${String(c)}`);
     }
   }
   const paletteLen = p.palette.length;
 
   if (!Array.isArray(p.cells)) {
-    warn(path, 'cells is not an array');
-    return null;
+    return fail(path, 'validation:no_cells');
   }
   const expectedLen = w * h;
   if (p.cells.length !== expectedLen) {
-    warn(path, `cells.length (${p.cells.length}) !== w*h (${expectedLen})`);
-    return null;
+    return fail(path, 'validation:cells_length_mismatch', `${p.cells.length}!=${expectedLen}`);
   }
   let computedPaintable = 0;
   const computedColorCounts: Record<string, number> = {};
@@ -167,13 +166,11 @@ export function validatePuzzleText(text: string, path: string): Puzzle | null {
   for (let i = 0; i < cells.length; i++) {
     const v = cells[i];
     if (typeof v !== 'number' || !Number.isInteger(v)) {
-      warn(path, `cells[${i}] is not an integer`, String(v));
-      return null;
+      return fail(path, 'validation:bad_cell_value', `[${i}]=${String(v)}`);
     }
     if (v === -1) continue;
     if (v < 0 || v >= paletteLen) {
-      warn(path, `cells[${i}] = ${v} out of palette range [0, ${paletteLen})`);
-      return null;
+      return fail(path, 'validation:cell_out_of_range', `[${i}]=${v} palette=${paletteLen}`);
     }
     computedPaintable++;
     const key = String(v);
@@ -185,9 +182,9 @@ export function validatePuzzleText(text: string, path: string): Puzzle | null {
   // puzzles can drift, and rendering correctness should track the
   // actual cell array.
   if (typeof p.paintableCells === 'number' && p.paintableCells !== computedPaintable) {
-    warn(
-      path,
-      `paintableCells mismatch (declared=${p.paintableCells} computed=${computedPaintable}); using computed value`,
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[mozai] puzzle ${path}: paintableCells declared=${p.paintableCells} computed=${computedPaintable}; using computed value`,
     );
   }
 
@@ -210,14 +207,15 @@ export function validatePuzzleText(text: string, path: string): Puzzle | null {
         : computedColorCounts,
     paintableCells: computedPaintable,
   };
-  return normalised;
+  return { ok: true, value: normalised };
 }
 
-function warn(path: string, reason: string, detail?: string): void {
+function fail(path: string, reason: string, detail?: string): ValidatorResult<never> {
   // eslint-disable-next-line no-console
   console.warn(
     `[mozai] puzzle validation failed for ${path} — ${reason}${detail ? ` (${detail})` : ''}`,
   );
+  return { ok: false, reason };
 }
 
 /**
@@ -228,7 +226,7 @@ export async function loadContentIndex(): Promise<ContentIndex> {
   const path = 'content/index.json';
   const result = await resolveContent(path);
   if (result.source === 'FAILED') {
-    throw new ContentResolveError(path);
+    throw new ContentResolveError(path, result.reason ?? 'unknown');
   }
   let data: ContentIndex;
   try {
@@ -273,7 +271,7 @@ export async function loadPuzzle(meta: PuzzleMeta): Promise<Puzzle> {
   const path = `content/room${meta.room}/${meta.id}.json`;
   const result = await resolveContent(path, { validate: validatePuzzleText });
   if (result.source === 'FAILED' || !result.parsed) {
-    throw new ContentResolveError(path);
+    throw new ContentResolveError(path, result.reason ?? 'unknown');
   }
   // Override id/room with the meta values — the content index is
   // the source of truth in the running app, and the JSON file's
