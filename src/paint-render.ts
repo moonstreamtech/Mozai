@@ -9,17 +9,35 @@
  *   - background cells (-1)               → transparent (RGBA 0,0,0,0)
  *   - filled cells                        → palette[i] RGBA
  *   - unfilled, hint-revealed cells       → silhouette grey RGBA
- *   - unfilled, not hinted                → transparent (the white
- *                                            canvas background shows
- *                                            through, matching the
- *                                            silhouette mode of the
- *                                            room-interior thumbs)
+ *   - unfilled, not hinted                → OPAQUE WHITE — the
+ *                                            paintable area reads as
+ *                                            a bright "island"
+ *                                            covering the centred
+ *                                            MOZAI watermark drawn
+ *                                            underneath. The
+ *                                            watermark therefore
+ *                                            only shows through in
+ *                                            -1 background cells.
  *
  * Per-cell updates are O(1) — we poke 4 bytes into the buffer. Per
  * frame is also O(1) on the JS side: one `drawImage(offscreen, ...)`
  * call that asks the GPU/compositor to scale the rectangle by the
  * current zoom. `imageSmoothingEnabled = false` gives nearest-
  * neighbour scaling for crisp pixel-art rendering at every zoom.
+ *
+ * Frame composition (bottom → top):
+ *   1. White fill of the visible canvas.
+ *   2. Centred faded MOZAI wordmark — screen-anchored, does NOT
+ *      pan or zoom with the grid.
+ *   3. Offscreen blit at the camera transform — covers the
+ *      watermark on every paintable cell, leaves it visible in
+ *      -1 background.
+ *   4. Light-grey gridlines on every PAINTABLE cell — keeps cells
+ *      legible even when they're white or painted white. Skipped
+ *      at pxPerCell < 6 (the lines alias into noise at extreme
+ *      zoom-out).
+ *   5. Selection outlines (only when a hint is unlocked).
+ *   6. Minimap (when bound).
  *
  * This means a 1000x1000 puzzle stays smooth even at full zoom-out
  * because we never iterate cells in JS during a render — we just
@@ -31,6 +49,15 @@
  */
 
 import type { PaintState } from './paint-state.js';
+
+/**
+ * Opacity of the centred MOZAI watermark drawn on the empty (-1)
+ * field. 0.12 keeps it a calm backdrop — easily readable as
+ * "this is empty space" without competing with the actual picture
+ * for attention. Bump up here if it feels too subtle in practice;
+ * nothing else in the renderer references this constant.
+ */
+const EMPTY_FIELD_LOGO_OPACITY = 0.12;
 
 const SILHOUETTE_RGBA: [number, number, number, number] = [192, 200, 209, 255];
 
@@ -126,12 +153,15 @@ export class PaintRenderer {
         data[p + 2] = SILHOUETTE_RGBA[2];
         data[p + 3] = SILHOUETTE_RGBA[3];
       } else {
-        // Unfilled, not hinted — transparent. The white canvas background
-        // shows through.
-        data[p] = 0;
-        data[p + 1] = 0;
-        data[p + 2] = 0;
-        data[p + 3] = 0;
+        // Unfilled, not hinted — OPAQUE WHITE so the paintable area
+        // forms a bright island covering the centred MOZAI
+        // watermark. Critically NOT transparent: that would let the
+        // watermark leak through every unpainted cell and turn the
+        // shape into a noisy hashmark of brand text.
+        data[p] = 255;
+        data[p + 1] = 255;
+        data[p + 2] = 255;
+        data[p + 3] = 255;
       }
     }
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0);
@@ -248,16 +278,16 @@ export class PaintRenderer {
    *
    * Layer order (bottom → top):
    *   1. White background.
-   *   2. Gridline outlines on UNFILLED paintable cells only.
-   *   3. Offscreen blit (palette colours for filled cells).
-   *
-   * The gridlines sit UNDER the palette colours so a filled cell
-   * shows its true palette colour with no edge tint. Previously the
-   * lines were stroked on top, which made every filled cell's
-   * outline ~12% darker than its interior — the "stuck highlight"
-   * the user reported on the last-tapped cell (it was actually
-   * present on every filled cell; the contiguous painted region
-   * just made it most visible at the boundary).
+   *   2. Centred MOZAI watermark — screen-anchored, does NOT pan
+   *      or zoom with the grid.
+   *   3. Offscreen blit — covers the watermark on every paintable
+   *      cell (now opaque) and leaves it visible on -1 background.
+   *   4. Gridlines on EVERY paintable cell. Drawn AFTER the blit so
+   *      filled cells get a visible hairline border too — critical
+   *      when cells are white or painted white. Skipped at
+   *      pxPerCell < 6 where the lines alias into noise.
+   *   5. Selection outlines (only when a hint is unlocked).
+   *   6. Minimap.
    */
   draw(): boolean {
     const { ctx, canvas, camera } = this;
@@ -273,6 +303,11 @@ export class PaintRenderer {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, bsW, bsH);
 
+    // Watermark sits UNDER the cells blit. The blit's opaque
+    // paintable cells cover it; only -1 background lets it show
+    // through, exactly the "empty branded field" affordance.
+    this.drawEmptyFieldLogo(bsW, bsH);
+
     ctx.imageSmoothingEnabled = false;
 
     const pxPerCell = camera.zoom * dpr;
@@ -281,16 +316,51 @@ export class PaintRenderer {
     const dstW = this.state.puzzle.w * pxPerCell;
     const dstH = this.state.puzzle.h * pxPerCell;
 
-    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
-    // Selection overlay sits ABOVE the palette colours — it must
-    // remain visible on painted cells too (well, no, painted cells
-    // of the selected colour are skipped — see the implementation).
+    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
     this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
 
     this.drawMinimap();
 
     return true;
+  }
+
+  /**
+   * Screen-anchored "MOZAI" wordmark drawn once per frame at the
+   * centre of the visible canvas. Scales to a fraction of the
+   * smaller viewport dimension and auto-shrinks if it would
+   * overflow horizontally on a narrow viewport. The wordmark itself
+   * is one fillText call — cost independent of grid size.
+   */
+  private drawEmptyFieldLogo(bsW: number, bsH: number): void {
+    const ctx = this.ctx;
+    const cx = bsW / 2;
+    const cy = bsH / 2;
+    // Target height ~26 % of the smaller viewport dimension. Big
+    // enough to read as a backdrop, small enough not to compete
+    // with the actual picture when fully zoomed out.
+    const target = Math.min(bsW, bsH) * 0.26;
+    ctx.save();
+    ctx.globalAlpha = EMPTY_FIELD_LOGO_OPACITY;
+    ctx.fillStyle = '#324259';
+    const fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif';
+    ctx.font = `900 ${Math.round(target)}px ${fontFamily}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    // Manual letter spacing via spaces — Canvas2D's letterSpacing
+    // property isn't reliably present on the Chrome 92 WebView.
+    const text = 'M O Z A I';
+    // Shrink if the rendered text would extend past ~75% of the
+    // viewport width. Tall narrow viewports (portrait phone vs a
+    // wide puzzle) would otherwise overflow.
+    const maxWidth = bsW * 0.75;
+    const measured = ctx.measureText(text).width;
+    if (measured > maxWidth) {
+      const scaled = target * (maxWidth / measured);
+      ctx.font = `900 ${Math.round(scaled)}px ${fontFamily}`;
+    }
+    ctx.fillText(text, cx, cy);
+    ctx.restore();
   }
 
   /**
@@ -429,21 +499,22 @@ export class PaintRenderer {
   }
 
   /**
-   * Faint per-cell outlines on UNFILLED paintable cells only, so the
-   * player can see the discrete cells to tap. Drawn BEFORE the
-   * offscreen blit (see draw()) so filled cells' palette colours
-   * paint over the lines — finished cells show pure palette colour
-   * with no edge tint. Background cells (-1) are also skipped: they
-   * aren't paintable so showing them as a tappable grid would
-   * mislead.
+   * Light-grey hairline outlines on EVERY paintable cell. Drawn
+   * AFTER the offscreen blit (see draw()) so painted cells —
+   * including pure-white palette entries — still read as discrete
+   * cells. Background (-1) cells are explicitly skipped so the
+   * watermark + clean empty field stay intact.
    *
-   * Skipped entirely when cells are too small (< 4 backing px per
-   * cell) to avoid a solid-grey wash at extreme zoom-out on huge
-   * grids. Per-cell rect outlines keep the JS work bounded by the
-   * VISIBLE cell count, not the puzzle size.
+   * Skipped entirely when cells are too small (< 6 backing px per
+   * cell) to avoid the lines aliasing into noise at extreme
+   * zoom-out on huge grids — the cell-colour contrast and the
+   * watermark backdrop carry visual clarity at that zoom range.
+   * Per-cell rect outlines keep the JS work bounded by the
+   * VISIBLE cell count, not the puzzle size: one beginPath /
+   * stroke pair per frame, paths batched in between.
    */
   private drawGridlines(bsW: number, bsH: number, pxPerCell: number, dstX: number, dstY: number): void {
-    if (pxPerCell < 4) return;
+    if (pxPerCell < 6) return;
     const { ctx, state, camera } = this;
     const dpr = window.devicePixelRatio || 1;
     const puzzleW = state.puzzle.w;
@@ -455,7 +526,7 @@ export class PaintRenderer {
     const cy0 = Math.max(0, Math.floor(camera.offsetY));
     const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
 
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+    ctx.strokeStyle = '#d8d8d8';
     ctx.lineWidth = Math.max(1, Math.round(dpr));
     ctx.beginPath();
     const psz = Math.max(1, Math.round(pxPerCell) - 1);
@@ -464,8 +535,12 @@ export class PaintRenderer {
       const rowBase = cy * puzzleW;
       for (let cx = cx0; cx < cx1; cx++) {
         const i = rowBase + cx;
-        if (state.solution[i] < 0) continue;       // background — never paintable
-        if (state.filled[i]) continue;             // already painted — covered by blit
+        // Background cells never get a gridline: the watermark +
+        // clean empty field MUST stay legible there.
+        if (state.solution[i] < 0) continue;
+        // Filled cells DO get a gridline now (no skip): a white-
+        // painted cell needs the border to remain visible against
+        // the bright island.
         const px = Math.round(dstX + cx * pxPerCell) + 0.5;
         // Single rect path per cell — batched into one stroke().
         ctx.moveTo(px, py);
