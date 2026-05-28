@@ -77,3 +77,21 @@ export async function writeCache(relPath: string, content: string): Promise<void
     encoding: Encoding.UTF8,
   });
 }
+
+/**
+ * Evict a cached file. Best-effort: missing-file errors are swallowed
+ * (the cache is already in the desired state). Used by the resolver
+ * when a cache read returns content that fails its validator — that
+ * blob is corrupt and must not be re-served, so we drop it and fall
+ * through to the network on the next read.
+ */
+export async function clearCache(relPath: string): Promise<void> {
+  try {
+    await Filesystem.deleteFile({
+      path: `${CACHE_DIR}/${relPath}`,
+      directory: Directory.Data,
+    });
+  } catch {
+    // File didn't exist or delete failed — fine.
+  }
+}

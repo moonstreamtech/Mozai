@@ -1,6 +1,7 @@
 /*
  * Content resolver — decides bundled vs cache vs network for any
- * content file path.
+ * content file path, with integrity guarantees against truncated
+ * or malformed bodies.
  *
  * Three resolution buckets:
  *
@@ -21,6 +22,19 @@
  *     cache. On success the response is written to the cache
  *     async (fire-and-forget — the user already has the content).
  *
+ * Integrity:
+ *   • If the caller supplies a `validate` function (the recommended
+ *     pattern for every content type), the resolver runs it on the
+ *     text payload before treating it as valid. A failed validator
+ *     on the cache path EVICTS the corrupt blob and falls through
+ *     to network; a failed validator on the network path SKIPS the
+ *     cache write and returns FAILED. The cache is therefore
+ *     guaranteed to only ever hold content that passed validation
+ *     at write time.
+ *   • The network path also checks Content-Length when the server
+ *     supplies one — a truncated body (bytes received ≠ advertised)
+ *     is treated as a transient failure and retried.
+ *
  * If all three fail (e.g. cache miss + network down on first room-2+
  * open), resolve returns `{ source: 'FAILED' }`. Scenes that catch
  * this surface a localized "needs internet" message + retry button
@@ -33,7 +47,7 @@
  */
 
 import { CDN_BASE } from './env.js';
-import { readCache, writeCache } from './content-cache.js';
+import { readCache, writeCache, clearCache } from './content-cache.js';
 
 export type ContentSource = 'bundled' | 'cache' | 'network' | 'FAILED';
 
@@ -82,12 +96,37 @@ function joinUrl(base: string, path: string): string {
   return `${b}${p}`;
 }
 
-export async function resolveContent(path: string): Promise<ResolveResult> {
+export interface ResolveOptions {
+  /**
+   * Optional content validator. Runs on the text payload after a
+   * cache hit and after a network fetch, BEFORE the payload is
+   * accepted. Return `true` for valid, `false` to reject.
+   *
+   *   • cache-hit + invalid → evict cache entry, fall through to
+   *                            network.
+   *   • network-ok + invalid → do NOT write cache; return FAILED.
+   *
+   * Bundled paths also run the validator — a corrupt asset is just
+   * as bad as a corrupt CDN response. Callers must supply a
+   * validator wherever a non-JSON or schema-violating body would
+   * be a correctness bug downstream (every puzzle / thumbs caller
+   * does).
+   */
+  validate?: (text: string) => boolean;
+}
+
+export async function resolveContent(
+  path: string,
+  opts: ResolveOptions = {},
+): Promise<ResolveResult> {
+  const validate = opts.validate;
+
   if (isBundledPath(path)) {
     try {
       const res = await fetch(path, { cache: 'no-store' });
       if (!res.ok) return { text: '', source: 'FAILED' };
       const text = await res.text();
+      if (validate && !validate(text)) return { text: '', source: 'FAILED' };
       return { text, source: 'bundled' };
     } catch {
       return { text: '', source: 'FAILED' };
@@ -98,19 +137,33 @@ export async function resolveContent(path: string): Promise<ResolveResult> {
   const cacheKey = stripContentPrefix(path);
   const cached = await readCache(cacheKey);
   if (cached !== null) {
-    return { text: cached, source: 'cache' };
+    if (!validate || validate(cached)) {
+      return { text: cached, source: 'cache' };
+    }
+    // Cache hit but corrupt (interrupted prior write, schema drift,
+    // disk damage). Evict so the next call falls through cleanly,
+    // then continue to the network for THIS call too.
+    await clearCache(cacheKey);
   }
 
   // Network from CDN with retry + timeout. A flaky connection
   // (intermittent "Failed to fetch" between successful requests)
   // would previously fall through to offline on the first failure;
-  // we now retry transient errors (network throws, 5xx) up to
-  // MAX_ATTEMPTS times. A definitive 4xx (e.g. 404) is NOT retried —
-  // that content genuinely isn't there.
+  // we now retry transient errors (network throws, 5xx, Content-
+  // Length mismatch) up to MAX_ATTEMPTS times. A definitive 4xx
+  // (e.g. 404) is NOT retried — that content genuinely isn't there.
   const cdnUrl = joinUrl(CDN_BASE, cacheKey);
   const fetchOutcome = await fetchWithRetry(cdnUrl);
   if (fetchOutcome.kind === 'ok') {
     const text = fetchOutcome.text;
+    if (validate && !validate(text)) {
+      // Server returned a complete but malformed body (e.g. corrupt
+      // upstream, MITM tampering, schema regression). NEVER cache
+      // an invalid payload — that would resurrect the corruption
+      // on every later cache hit. Surface as FAILED so the caller
+      // can show its offline / retry path.
+      return { text: '', source: 'FAILED' };
+    }
     // Fire-and-forget cache write. The user has the content already;
     // a write failure (disk full, permission) shouldn't fail the
     // resolve.
@@ -136,21 +189,46 @@ async function fetchWithRetry(url: string): Promise<FetchOutcome> {
   for (let k = 1; k <= MAX_ATTEMPTS; k++) {
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    let transientFailure = false;
     try {
       const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
         const text = await res.text();
-        return { kind: 'ok', text };
+        // Content-Length integrity check. A flaky connection can
+        // drop the socket after the headers but before the body
+        // fully arrives; on some browsers/WebViews this resolves
+        // with whatever bytes did make it. Compare the actual
+        // received byte length to the advertised Content-Length
+        // and treat a mismatch as a transient failure (retry, then
+        // bubble up as FAILED). Skipped when the server doesn't
+        // send Content-Length (chunked transfer): in that case the
+        // caller-supplied content validator catches truncation via
+        // JSON.parse / schema check.
+        const cl = res.headers.get('content-length');
+        if (cl !== null) {
+          const expected = parseInt(cl, 10);
+          if (Number.isFinite(expected)) {
+            const actual = new TextEncoder().encode(text).length;
+            if (actual !== expected) {
+              lastReason = `truncated body: got ${actual} bytes, expected ${expected}`;
+              transientFailure = true;
+            }
+          }
+        }
+        if (!transientFailure) {
+          return { kind: 'ok', text };
+        }
+      } else {
+        // 4xx (except 408 request-timeout, 429 too-many-requests) is
+        // definitive — return without further retry. The caller will
+        // surface this as offline / FAILED.
+        const transient = res.status >= 500 || res.status === 408 || res.status === 429;
+        if (!transient) {
+          return { kind: 'failed', reason: `status ${res.status}` };
+        }
+        lastReason = `status ${res.status}`;
       }
-      // 4xx (except 408 request-timeout, 429 too-many-requests) is
-      // definitive — return without further retry. The caller will
-      // surface this as offline / FAILED.
-      const transient = res.status >= 500 || res.status === 408 || res.status === 429;
-      if (!transient) {
-        return { kind: 'failed', reason: `status ${res.status}` };
-      }
-      lastReason = `status ${res.status}`;
     } catch (err) {
       clearTimeout(timeoutId);
       // AbortError, "Failed to fetch", and other network errors all

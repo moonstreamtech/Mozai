@@ -31,25 +31,75 @@ export interface Thumb {
 
 export type ThumbBundle = Record<string, Thumb>;
 
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Validate raw thumbs.json text. Used by loadRoomThumbs and by
+ * resolveContent (pre-cache-write / cache-read) so a malformed
+ * thumbs blob is detected before it can poison the cache or render.
+ *
+ * A bundle is valid iff every entry has:
+ *   • positive integer w, h with w === h
+ *   • cells.length === w*h
+ *   • palette of HEX6_RE strings
+ *   • each cell value -1 or 0 ≤ v < palette.length
+ *
+ * Single bad entry invalidates the whole bundle — partial credit
+ * would leave half the room unrendered.
+ */
+export function validateThumbsText(text: string): boolean {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!obj || typeof obj !== 'object') return false;
+  const bundle = obj as Record<string, unknown>;
+  for (const key of Object.keys(bundle)) {
+    if (!validateThumb(bundle[key])) return false;
+  }
+  return true;
+}
+
+function validateThumb(obj: unknown): obj is Thumb {
+  if (!obj || typeof obj !== 'object') return false;
+  const t = obj as Record<string, unknown>;
+  if (typeof t.w !== 'number' || !Number.isInteger(t.w) || t.w <= 0) return false;
+  if (typeof t.h !== 'number' || !Number.isInteger(t.h) || t.h <= 0) return false;
+  if (t.w !== t.h) return false;
+  if (!Array.isArray(t.palette)) return false;
+  for (const c of t.palette) {
+    if (typeof c !== 'string' || !HEX6_RE.test(c)) return false;
+  }
+  const paletteLen = t.palette.length;
+  if (paletteLen === 0) return false;
+  if (!Array.isArray(t.cells)) return false;
+  if (t.cells.length !== (t.w as number) * (t.h as number)) return false;
+  for (const v of t.cells) {
+    if (typeof v !== 'number' || !Number.isInteger(v)) return false;
+    if (v === -1) continue;
+    if (v < 0 || v >= paletteLen) return false;
+  }
+  return true;
+}
+
 const bundleCache = new Map<number, Promise<ThumbBundle>>();
 
 /**
  * Fetch (and cache) a room's thumbs.json. Two callers for the same
  * room share the in-flight promise — no double fetch on rapid
- * back-and-forth navigation.
+ * back-and-forth navigation. Validated by validateThumbsText at the
+ * resolver layer so a corrupt cached blob is evicted instead of
+ * served.
  */
 export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const cached = bundleCache.get(roomN);
   if (cached) return cached;
   const path = `content/room${roomN}/thumbs.json`;
-  // Route through the bundled-vs-cache-vs-network resolver. Room 1's
-  // thumbs are bundled; rooms 2+ are cache-first / CDN-fallback.
-  // The resolver returns source='FAILED' for offline + uncached,
-  // which we surface as ContentResolveError so the scene shows the
-  // localized "needs internet" panel.
   // A rejected promise is EVICTED from bundleCache so a retry from
   // the scene actually re-runs the resolver.
-  const p = resolveContent(path)
+  const p = resolveContent(path, { validate: validateThumbsText })
     .then((result) => {
       if (result.source === 'FAILED') {
         throw new ContentResolveError(path);

@@ -64,6 +64,69 @@ export class ContentResolveError extends Error {
 }
 
 /**
+ * Hex colour regex used by every palette validator. Strict 6-digit
+ * form — the prebuild generator only emits #rrggbb so anything else
+ * (truncated `#fff`, alpha `#rrggbbaa`, RGBA tuples) is a sign of
+ * corruption.
+ */
+const HEX6_RE = /^#[0-9a-fA-F]{6}$/;
+
+/**
+ * Validate raw puzzle JSON text. Used both by loadPuzzle (post
+ * resolve) and by resolveContent itself (pre-cache-write / cache
+ * read) so a malformed body is detected the first place it could
+ * possibly cause downstream damage.
+ *
+ * Returns true iff:
+ *   • JSON.parse succeeds
+ *   • required fields are present and correctly typed
+ *   • w === h, both positive integers
+ *   • cells.length === w*h
+ *   • every cell is an integer; either -1 or 0 ≤ v < palette.length
+ *   • palette entries match HEX6_RE
+ *   • paintableCells (if present) equals the count of non -1 cells
+ *
+ * A truncated body almost always trips JSON.parse; a body that
+ * happens to parse but lost data in transit trips the length check.
+ * No partial credit — a single failure invalidates the file.
+ */
+export function validatePuzzleText(text: string): boolean {
+  let obj: unknown;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (!obj || typeof obj !== 'object') return false;
+  const p = obj as Record<string, unknown>;
+  if (typeof p.id !== 'string' || p.id.length === 0) return false;
+  if (typeof p.room !== 'number' || !Number.isInteger(p.room) || p.room <= 0) return false;
+  if (typeof p.w !== 'number' || !Number.isInteger(p.w) || p.w <= 0) return false;
+  if (typeof p.h !== 'number' || !Number.isInteger(p.h) || p.h <= 0) return false;
+  if (p.w !== p.h) return false;
+  if (!Array.isArray(p.palette)) return false;
+  for (const c of p.palette) {
+    if (typeof c !== 'string' || !HEX6_RE.test(c)) return false;
+  }
+  const paletteLen = p.palette.length;
+  if (paletteLen === 0) return false;
+  if (!Array.isArray(p.cells)) return false;
+  const expectedLen = (p.w as number) * (p.h as number);
+  if (p.cells.length !== expectedLen) return false;
+  let paintable = 0;
+  for (const v of p.cells) {
+    if (typeof v !== 'number' || !Number.isInteger(v)) return false;
+    if (v === -1) continue;
+    if (v < 0 || v >= paletteLen) return false;
+    paintable++;
+  }
+  if (typeof p.paintableCells === 'number') {
+    if (p.paintableCells !== paintable) return false;
+  }
+  return true;
+}
+
+/**
  * Fetch the content index. ALWAYS bundled — never fetched from the
  * CDN — so the home screen renders on a cold boot with no network.
  */
@@ -90,8 +153,11 @@ export async function loadContentIndex(): Promise<ContentIndex> {
  * Fetch a single full puzzle JSON. In-memory cache per id so
  * re-opening the same picture during a session doesn't re-hit
  * storage. Underlying read is bundled (room1) or
- * cache-then-network (rooms 2+) via resolveContent. Throws
- * ContentResolveError when offline + uncached.
+ * cache-then-network (rooms 2+) via resolveContent, with
+ * validatePuzzleText gating both cache reads and cache writes.
+ * Throws ContentResolveError when offline + uncached AND when a
+ * fetched body fails validation (treated equivalently — the user
+ * cannot proceed with this puzzle).
  */
 const puzzleCache = new Map<string, Puzzle>();
 
@@ -99,10 +165,13 @@ export async function loadPuzzle(meta: PuzzleMeta): Promise<Puzzle> {
   const cached = puzzleCache.get(meta.id);
   if (cached) return cached;
   const path = `content/room${meta.room}/${meta.id}.json`;
-  const result = await resolveContent(path);
+  const result = await resolveContent(path, { validate: validatePuzzleText });
   if (result.source === 'FAILED') {
     throw new ContentResolveError(path);
   }
+  // The resolver already validated, so JSON.parse is guaranteed to
+  // succeed here. Wrapping in try/catch belt-and-braces against any
+  // future refactor that loosens the validator.
   let puzzle: Puzzle;
   try {
     puzzle = JSON.parse(result.text) as Puzzle;
