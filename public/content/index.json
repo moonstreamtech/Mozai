@@ -1,0 +1,77 @@
+{
+  "maxRoom": 100,
+  "rooms": {
+    "1": [
+      {
+        "id": "r1-001",
+        "room": 1,
+        "w": 10,
+        "h": 10,
+        "colors": 3,
+        "paintableCells": 48
+      },
+      {
+        "id": "r1-002",
+        "room": 1,
+        "w": 10,
+        "h": 10,
+        "colors": 3,
+        "paintableCells": 38
+      },
+      {
+        "id": "r1-003",
+        "room": 1,
+        "w": 10,
+        "h": 10,
+        "colors": 4,
+        "paintableCells": 60
+      }
+    ],
+    "2": [
+      {
+        "id": "r2-001",
+        "room": 2,
+        "w": 20,
+        "h": 20,
+        "colors": 3,
+        "paintableCells": 144
+      },
+      {
+        "id": "r2-002",
+        "room": 2,
+        "w": 20,
+        "h": 20,
+        "colors": 4,
+        "paintableCells": 180
+      },
+      {
+        "id": "r2-003",
+        "room": 2,
+        "w": 20,
+        "h": 20,
+        "colors": 3,
+        "paintableCells": 180
+      }
+    ],
+    "3": [
+      {
+        "id": "r3-001",
+        "room": 3,
+        "w": 30,
+        "h": 30,
+        "colors": 5,
+        "paintableCells": 648
+      }
+    ],
+    "100": [
+      {
+        "id": "r100-001",
+        "room": 100,
+        "w": 1000,
+        "h": 1000,
+        "colors": 5,
+        "paintableCells": 785456
+      }
+    ]
+  }
+}

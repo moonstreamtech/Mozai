@@ -1,0 +1,82 @@
+# Auto-regenerate content indexes on PRs touching public/content.
+#
+# Trigger: any pull request (opened, synchronize, reopened) whose
+# diff includes files under public/content/. Effect: runs the
+# project's prebuild script (build-content-index.mjs), which
+# regenerates public/content/index.json and every
+# public/content/roomN/thumbs.json from the current set of puzzle
+# JSONs. If those derived files changed, the workflow commits the
+# updates back onto the PR branch so the review covers a
+# self-consistent set of files — reviewers see "1 new puzzle +
+# matching index/thumbs updates" rather than "1 new puzzle, please
+# remember to run prebuild before merge".
+#
+# Net effect for the developer: the puzzle-maker tool can open a
+# PR with just the raw puzzle JSON; the matching index + thumbs
+# show up automatically as a follow-up commit on the same PR.
+#
+# No-op when the prebuild output is byte-identical to what's
+# already committed (no empty commits).
+
+name: content-index-on-pr
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'public/content/**'
+
+# The default GITHUB_TOKEN is sufficient for same-repo PRs (the
+# solo-dev workflow). Forked-repo PRs would need a different
+# token strategy; not in scope.
+permissions:
+  contents: write
+
+jobs:
+  regenerate-indexes:
+    runs-on: ubuntu-latest
+    # Skip the job entirely for forked-repo PRs — the default token
+    # cannot push to a fork's branch, so attempting the push would
+    # fail loudly. Same-repo PRs (head.repo.full_name === base.repo.
+    # full_name) proceed as normal.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          # Check out the PR's head ref (not the merge commit) and
+          # use a fetch-depth of 0 so the subsequent push has full
+          # history to fast-forward from.
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the version used by build.yml + release.yml.
+          node-version: '20'
+
+      - name: Regenerate content index + thumbs
+        run: node scripts/build-content-index.mjs
+
+      - name: Commit + push derived files (if changed)
+        env:
+          # Use the GitHub Actions bot identity so the commit shows
+          # up as the workflow's own change, not impersonating the
+          # PR author.
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          # Stage ONLY the derived index + thumbs files. If the PR
+          # itself happens to have edited unrelated files, those
+          # stay untouched.
+          git add public/content/index.json public/content/room*/thumbs.json
+          if git diff --cached --quiet; then
+            echo "No changes to index or thumbs. Skipping commit."
+            exit 0
+          fi
+          git commit -m "chore(content): regenerate index + thumbs"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}

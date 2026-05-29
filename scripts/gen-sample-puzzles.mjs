@@ -71,22 +71,51 @@ const SHAPES = {
   },
 
   /**
-   * Heart. Implicit curve `(x² + y² − 1)³ − x²·y³ ≤ 0` in
-   * normalised coords. Interior coloured by radial band.
+   * Heart, constructed as two overlapping circular lobes (top) plus a
+   * downward-pointing triangle (bottom). The implicit-curve form
+   * `(x²+y²−1)³ − x²y³ ≤ 0` was too smooth at 10×10 to read as a
+   * heart — no notch between the lobes, no V-point at the tip. This
+   * explicit construction locks the lobe and tip geometry to fractions
+   * of the grid side, so the silhouette is recognisable at every
+   * resolution (10×10 sample → 1000×1000).
    */
   heart(x, y, w, h, palette) {
+    const side = Math.min(w, h);
     const cx = (w - 1) / 2;
-    // Shift up so the heart sits visually centred (the curve has
-    // its centroid above its geometric centre).
-    const cy = (h - 1) / 2 - h * 0.08;
-    const scale = Math.min(w, h) / 2.4;
-    const nx = (x - cx) / scale;
-    const ny = -(y - cy) / scale;
-    const t = nx * nx + ny * ny - 1;
-    const v = t * t * t - nx * nx * ny * ny * ny;
-    if (v > 0) return -1;
-    // Inside — palette by depth from outline.
-    const depth = Math.min(1, -v / 1.2);
+    const lobeR = side * 0.27;
+    const lobeOffsetX = side * 0.18;
+    const lobeCy = h * 0.25;
+    const apexY = h * 0.85;
+    const halfBase = side * 0.40;
+    const leftCx = cx - lobeOffsetX;
+    const rightCx = cx + lobeOffsetX;
+    const lobeRsq = lobeR * lobeR;
+
+    const dxL = x - leftCx;
+    const dxR = x - rightCx;
+    const dyLobe = y - lobeCy;
+    const inLeftLobe = dxL * dxL + dyLobe * dyLobe <= lobeRsq;
+    const inRightLobe = dxR * dxR + dyLobe * dyLobe <= lobeRsq;
+
+    let inTriangle = false;
+    if (y >= lobeCy && y <= apexY) {
+      const t = (y - lobeCy) / (apexY - lobeCy);
+      const halfWidth = (1 - t) * halfBase;
+      inTriangle = Math.abs(x - cx) <= halfWidth;
+    }
+
+    if (!inLeftLobe && !inRightLobe && !inTriangle) return -1;
+
+    // Radial banding from the heart's visual centre (a touch above
+    // the bounding-box centre — that's where the body is widest).
+    // Outer cells get palette[0] (dark), centre cells the last
+    // palette entry (light).
+    const centerY = h * 0.45;
+    const normR = side / 2;
+    const ndx = (x - cx) / normR;
+    const ndy = (y - centerY) / normR;
+    const dist = Math.hypot(ndx, ndy);
+    const depth = Math.max(0, 1 - dist * 1.3);
     const band = Math.floor(depth * palette.length);
     return Math.min(palette.length - 1, band);
   },

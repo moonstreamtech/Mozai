@@ -31,7 +31,6 @@
 import type { SceneContext, SceneMount } from './scenes.js';
 import { isRoomUnlocked } from './content.js';
 import { completedCountForRoom } from './progress.js';
-import { bootLog } from './error-overlay.js';
 import { t } from './i18n.js';
 
 const COLUMNS = 5;
@@ -72,16 +71,6 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
   for (let n = 1; n <= maxRoom; n++) {
     grid.appendChild(buildRoomCell(n, ctx));
   }
-  // Explicit boot-strip telemetry so a "0 rooms" failure mode is
-  // visibly distinguishable from "scene didn't mount at all". The
-  // tile count is read off the live DOM so it confirms the appended
-  // children actually landed.
-  bootLog(
-    `scene-rooms render: maxRoom=${maxRoom} tilesAppended=${grid.children.length}`,
-  );
-  if (maxRoom === 0 || grid.children.length === 0) {
-    bootLog('WARNING rooms=0 — scene-rooms produced an empty grid');
-  }
 
   if (maxRoom === 0) {
     // Empty-state fallback. Should only be hit before any puzzle JSON
@@ -114,8 +103,8 @@ function buildRoomCell(n: number, ctx: SceneContext): HTMLElement {
   cell.setAttribute(
     'aria-label',
     unlocked
-      ? `Room ${n}, ${done} of ${total} complete (${pct}%)`
-      : `Room ${n} locked. Complete ${n} pictures in room ${n - 1} to unlock.`,
+      ? t('roomCellLabel', { n, done, total, pct })
+      : t('roomCellLocked', { n, prev: n - 1 }),
   );
 
   // Inner DOM order matters for layering: fill must be the first

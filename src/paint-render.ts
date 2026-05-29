@@ -11,9 +11,10 @@
  *   - unfilled, hint-revealed cells       → silhouette grey RGBA
  *   - unfilled, not hinted                → transparent (the white
  *                                            canvas background shows
- *                                            through, matching the
- *                                            silhouette mode of the
- *                                            room-interior thumbs)
+ *                                            through; gridlines on
+ *                                            top distinguish the
+ *                                            cell from the empty
+ *                                            -1 field)
  *
  * Per-cell updates are O(1) — we poke 4 bytes into the buffer. Per
  * frame is also O(1) on the JS side: one `drawImage(offscreen, ...)`
@@ -21,10 +22,29 @@
  * current zoom. `imageSmoothingEnabled = false` gives nearest-
  * neighbour scaling for crisp pixel-art rendering at every zoom.
  *
+ * Frame composition (bottom → top):
+ *   1. White fill of the visible canvas.
+ *   2. Offscreen blit at the camera transform — paints palette
+ *      colour on filled cells and silhouette grey on hint-revealed
+ *      cells. -1 background and unfilled+no-hint cells stay
+ *      transparent (white shows through).
+ *   3. Light-grey gridlines on every PAINTABLE cell. Skipped at
+ *      pxPerCell < 6 where they alias into noise.
+ *   4. Per-cell faded MOZAI logo tile on every -1 BACKGROUND cell.
+ *      Distinguishes the empty field from paintable cells at a
+ *      glance. Skipped at pxPerCell < BG_LOGO_MIN_PX_PER_CELL where
+ *      the tile is sub-pixel; the cell-colour contrast carries the
+ *      visual at that zoom range.
+ *   5. Selection outlines (only when a hint is unlocked).
+ *   6. Minimap (when bound).
+ *
  * This means a 1000x1000 puzzle stays smooth even at full zoom-out
  * because we never iterate cells in JS during a render — we just
  * blit a 1000x1000 RGBA buffer to a much smaller viewport, which is
- * a single GPU-accelerated operation.
+ * a single GPU-accelerated operation. At zoomed-in views we DO
+ * iterate the visible cell range (typically < 5000 cells) twice
+ * — once for gridlines, once for background logo tiles — both
+ * viewport-bounded, never grid-bounded.
  *
  * Memory: 1000x1000 RGBA = 4 MB for the offscreen. Plus the visible
  * canvas backing store (dpr * cssSize). Cheap on modern phones.
@@ -32,7 +52,74 @@
 
 import type { PaintState } from './paint-state.js';
 
+/**
+ * Opacity of the per-cell MOZAI app-logo tile drawn on every -1
+ * BACKGROUND cell. 0.15 is enough to clearly read "this is empty
+ * space" without competing with the actual picture. Baked once
+ * into a pre-faded offscreen at icon-load time so the per-frame
+ * path is plain drawImage with no globalAlpha churn. Single
+ * retune knob — bump up or down here.
+ */
+const BG_LOGO_OPACITY = 0.15;
+
+/**
+ * Below this many backing pixels per cell the logo tile is
+ * sub-pixel and would just contribute noise. We skip the tile
+ * pass entirely at that zoom; the cells render plain.
+ */
+const BG_LOGO_MIN_PX_PER_CELL = 12;
+
 const SILHOUETTE_RGBA: [number, number, number, number] = [192, 200, 209, 255];
+
+// -------- Module-shared background-logo loader --------
+//
+// One image, one pre-faded offscreen canvas, shared by every
+// PaintRenderer in the session. Loaded lazily on first use; while
+// loading, callers register a callback (typically scheduleFrame)
+// so they redraw once the asset is ready. A load failure leaves
+// bgLogoFaded null and drawBackgroundLogos quietly no-ops — the
+// tile is decorative, NOT load-bearing for gameplay.
+
+let bgLogoFaded: HTMLCanvasElement | null = null;
+let bgLogoLoadStarted = false;
+const bgLogoOnLoadCallbacks: Array<() => void> = [];
+
+function getBackgroundLogo(onLoad: () => void): HTMLCanvasElement | null {
+  if (bgLogoFaded) return bgLogoFaded;
+  bgLogoOnLoadCallbacks.push(onLoad);
+  if (bgLogoLoadStarted) return null;
+  bgLogoLoadStarted = true;
+  const img = new Image();
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.naturalWidth;
+    c.height = img.naturalHeight;
+    const cx = c.getContext('2d');
+    if (cx) {
+      // Bake the alpha in once. Subsequent per-cell drawImage calls
+      // can stay alpha-state-clean — important for the per-frame
+      // visible-cell loop on huge grids.
+      cx.globalAlpha = BG_LOGO_OPACITY;
+      cx.drawImage(img, 0, 0);
+      bgLogoFaded = c;
+    }
+    // Wake every renderer that was waiting.
+    const cbs = bgLogoOnLoadCallbacks.splice(0);
+    for (const cb of cbs) cb();
+  };
+  img.onerror = () => {
+    // Stay un-loaded; tile pass becomes a no-op forever for this
+    // session. Decorative loss only.
+    bgLogoLoadStarted = false;
+  };
+  // Resolve relative to the document so the path works under both
+  // the Vite dev server (root) and the Capacitor WebView origin
+  // (https://localhost/). Vite copies public/mozai-icon.png to
+  // dist/mozai-icon.png; Capacitor serves dist/ from the WebView
+  // root, so the same URL works in production.
+  img.src = new URL('mozai-icon.png', location.href).href;
+  return null;
+}
 
 export interface Camera {
   /** Top-left visible cell coords (float — sub-cell pan is allowed). */
@@ -57,6 +144,24 @@ export class PaintRenderer {
   private readonly offscreenData: ImageData;
   /** Pre-parsed RGBA per palette index. */
   private readonly paletteRgba: Uint8ClampedArray;
+  /**
+   * Pre-parsed grayscale (luminance) RGBA per palette index. Used by
+   * the minimap offscreen so unpainted paintable cells render as a
+   * faded silhouette in the palette's own greyscale — the player
+   * sees progress as colour-fills-in-over-grayscale, mirroring the
+   * room-interior thumb convention.
+   */
+  private readonly paletteRgbaGray: Uint8ClampedArray;
+  /**
+   * Parallel offscreen rendered for the minimap. Same w×h as the
+   * main offscreen, but unpainted paintable cells render in their
+   * palette's grayscale luminance (not transparent / not the main
+   * canvas's silhouette grey). Lets the minimap show "discovery
+   * progress" at a glance.
+   */
+  private readonly minimapOffscreen: HTMLCanvasElement;
+  private readonly minimapOffscreenCtx: CanvasRenderingContext2D;
+  private readonly minimapOffscreenData: ImageData;
   /** Frame coalescing. */
   private rafId = 0;
 
@@ -69,6 +174,14 @@ export class PaintRenderer {
    * direct assignment won't schedule a redraw.
    */
   selectedColor = -1;
+
+  /**
+   * Optional minimap canvas. When set, every draw() also paints a
+   * scaled-down copy of the offscreen into this canvas with the
+   * current viewport rectangle overlaid. Cleared by setMinimap(null).
+   */
+  private minimap: HTMLCanvasElement | null = null;
+  private minimapCtx: CanvasRenderingContext2D | null = null;
 
   constructor(canvas: HTMLCanvasElement, state: PaintState) {
     this.canvas = canvas;
@@ -85,64 +198,126 @@ export class PaintRenderer {
     this.offscreenCtx = offCtx;
     this.offscreenData = offCtx.createImageData(state.puzzle.w, state.puzzle.h);
 
+    // Parallel offscreen for the minimap: same w×h, different per-
+    // cell colour rule (grayscale unpainted vs true-colour painted)
+    // so the minimap shows discovery progress at a glance.
+    this.minimapOffscreen = document.createElement('canvas');
+    this.minimapOffscreen.width = state.puzzle.w;
+    this.minimapOffscreen.height = state.puzzle.h;
+    const mmCtx = this.minimapOffscreen.getContext('2d', { willReadFrequently: false });
+    if (!mmCtx) throw new Error('Minimap offscreen canvas 2D context unavailable');
+    this.minimapOffscreenCtx = mmCtx;
+    this.minimapOffscreenData = mmCtx.createImageData(state.puzzle.w, state.puzzle.h);
+
     this.paletteRgba = parsePalette(state.puzzle.palette);
+    this.paletteRgbaGray = parsePaletteGray(state.puzzle.palette);
 
     this.rebuildBuffer();
   }
 
   /**
-   * Walk every cell once and populate the offscreen pixel buffer.
-   * Called at boot and after restoring saved state — cheap for any
-   * size (1M pixel touches at ~5 ns each ≈ 5 ms).
+   * Walk every cell once and populate BOTH offscreen buffers (the
+   * main paint-canvas one and the minimap one). Called at boot and
+   * after restoring saved state. Cheap for any size (2 × 1M pixel
+   * touches at ~5 ns each ≈ 10 ms even on 1000×1000).
+   *
+   * Main offscreen rules:
+   *   -1 → transparent | painted → palette | hint → silhouette grey
+   *   | unpainted+no-hint → transparent
+   *
+   * Minimap offscreen rules:
+   *   -1 → transparent | painted → palette
+   *   | unpainted (regardless of hint) → palette grayscale luminance
+   * The minimap deliberately ignores hint reveal: the minimap shows
+   * "discovery progress" (colour fills in over grayscale), not the
+   * main canvas's silhouette/hint state.
    */
   rebuildBuffer(): void {
     const { solution, filled, hintRevealed } = this.state;
     const data = this.offscreenData.data;
+    const mmData = this.minimapOffscreenData.data;
     for (let i = 0; i < solution.length; i++) {
       const v = solution[i];
       const p = i * 4;
       if (v < 0) {
+        // Both buffers: transparent.
         data[p] = 0;
         data[p + 1] = 0;
         data[p + 2] = 0;
         data[p + 3] = 0;
+        mmData[p] = 0;
+        mmData[p + 1] = 0;
+        mmData[p + 2] = 0;
+        mmData[p + 3] = 0;
       } else if (filled[i]) {
+        // Both buffers: true palette colour.
         const pp = v * 4;
         data[p] = this.paletteRgba[pp];
         data[p + 1] = this.paletteRgba[pp + 1];
         data[p + 2] = this.paletteRgba[pp + 2];
         data[p + 3] = this.paletteRgba[pp + 3];
-      } else if (hintRevealed.has(v)) {
-        data[p] = SILHOUETTE_RGBA[0];
-        data[p + 1] = SILHOUETTE_RGBA[1];
-        data[p + 2] = SILHOUETTE_RGBA[2];
-        data[p + 3] = SILHOUETTE_RGBA[3];
+        mmData[p] = this.paletteRgba[pp];
+        mmData[p + 1] = this.paletteRgba[pp + 1];
+        mmData[p + 2] = this.paletteRgba[pp + 2];
+        mmData[p + 3] = this.paletteRgba[pp + 3];
       } else {
-        // Unfilled, not hinted — transparent. The white canvas background
-        // shows through.
-        data[p] = 0;
-        data[p + 1] = 0;
-        data[p + 2] = 0;
-        data[p + 3] = 0;
+        // Unfilled. Main canvas: silhouette grey only if hinted,
+        // else transparent. Minimap: always grayscale of palette
+        // colour so the silhouette stays visible there regardless
+        // of hint state.
+        const pp = v * 4;
+        mmData[p] = this.paletteRgbaGray[pp];
+        mmData[p + 1] = this.paletteRgbaGray[pp + 1];
+        mmData[p + 2] = this.paletteRgbaGray[pp + 2];
+        mmData[p + 3] = this.paletteRgbaGray[pp + 3];
+        if (hintRevealed.has(v)) {
+          data[p] = SILHOUETTE_RGBA[0];
+          data[p + 1] = SILHOUETTE_RGBA[1];
+          data[p + 2] = SILHOUETTE_RGBA[2];
+          data[p + 3] = SILHOUETTE_RGBA[3];
+        } else {
+          // Unfilled, not hinted — transparent on the main canvas.
+          // The white canvas background shows through; gridlines on
+          // top distinguish each cell. Per-cell background-logo
+          // tiles (drawn over -1 cells only) make the empty field
+          // visibly different from this paintable-but-empty state.
+          data[p] = 0;
+          data[p + 1] = 0;
+          data[p + 2] = 0;
+          data[p + 3] = 0;
+        }
       }
     }
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0);
+    this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0);
   }
 
-  /** Mark cell `i` as freshly filled — update offscreen + schedule a frame. */
+  /**
+   * Mark cell `i` as freshly filled — update BOTH offscreens (main +
+   * minimap) and schedule a frame. The minimap offscreen transitions
+   * the cell from grayscale → true colour at the same instant the
+   * main canvas transitions from transparent/silhouette → true
+   * colour, so progress on both renders synchronously.
+   */
   updateCellFilled(i: number): void {
     const v = this.state.solution[i];
     if (v < 0) return;
     const data = this.offscreenData.data;
+    const mmData = this.minimapOffscreenData.data;
     const p = i * 4;
     const pp = v * 4;
-    data[p] = this.paletteRgba[pp];
-    data[p + 1] = this.paletteRgba[pp + 1];
-    data[p + 2] = this.paletteRgba[pp + 2];
-    data[p + 3] = this.paletteRgba[pp + 3];
-    // For a single-cell update, putImageData on the cell rect is far
-    // cheaper than re-uploading the whole buffer (puts only 4 bytes).
-    this.offscreenCtx.putImageData(this.offscreenData, 0, 0, i % this.state.puzzle.w, Math.floor(i / this.state.puzzle.w), 1, 1);
+    const r = this.paletteRgba[pp];
+    const g = this.paletteRgba[pp + 1];
+    const b = this.paletteRgba[pp + 2];
+    const a = this.paletteRgba[pp + 3];
+    data[p] = r; data[p + 1] = g; data[p + 2] = b; data[p + 3] = a;
+    mmData[p] = r; mmData[p + 1] = g; mmData[p + 2] = b; mmData[p + 3] = a;
+    // Single-cell partial putImageData is far cheaper than re-
+    // uploading the whole buffer (puts only 4 bytes).
+    const cx = i % this.state.puzzle.w;
+    const cy = Math.floor(i / this.state.puzzle.w);
+    this.offscreenCtx.putImageData(this.offscreenData, 0, 0, cx, cy, 1, 1);
+    this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0, cx, cy, 1, 1);
     this.scheduleFrame();
   }
 
@@ -187,6 +362,48 @@ export class PaintRenderer {
   }
 
   /**
+   * Bind (or clear) a minimap canvas. The renderer paints into it
+   * on every frame: scaled offscreen + viewport rectangle overlay.
+   * Pass null to detach (the canvas stays in the DOM but is no
+   * longer updated). Caller is responsible for show/hide.
+   */
+  setMinimap(canvas: HTMLCanvasElement | null): void {
+    this.minimap = canvas;
+    this.minimapCtx = canvas ? canvas.getContext('2d') : null;
+    if (canvas) this.scheduleFrame();
+  }
+
+  /**
+   * Convert a minimap-local CSS coordinate to puzzle world cell
+   * coordinates. Returns null when the point falls outside the
+   * scaled puzzle area inside the minimap (e.g. letterboxing on
+   * non-square puzzles). Used by minimap tap-to-pan.
+   */
+  minimapToWorld(cssX: number, cssY: number): { worldX: number; worldY: number } | null {
+    const canvas = this.minimap;
+    if (!canvas) return null;
+    const dpr = window.devicePixelRatio || 1;
+    const bsW = canvas.width;
+    const bsH = canvas.height;
+    if (bsW === 0 || bsH === 0) return null;
+    const puzzleW = this.state.puzzle.w;
+    const puzzleH = this.state.puzzle.h;
+    const scale = Math.min(bsW / puzzleW, bsH / puzzleH);
+    const drawnW = puzzleW * scale;
+    const drawnH = puzzleH * scale;
+    const offX = (bsW - drawnW) / 2;
+    const offY = (bsH - drawnH) / 2;
+    const px = cssX * dpr;
+    const py = cssY * dpr;
+    if (px < offX || px > offX + drawnW) return null;
+    if (py < offY || py > offY + drawnH) return null;
+    return {
+      worldX: (px - offX) / scale,
+      worldY: (py - offY) / scale,
+    };
+  }
+
+  /**
    * Single-call render: one drawImage from offscreen at native
    * resolution into the visible canvas at the camera transform. The
    * compositor handles the scaling. We do clip to the visible
@@ -198,16 +415,18 @@ export class PaintRenderer {
    *
    * Layer order (bottom → top):
    *   1. White background.
-   *   2. Gridline outlines on UNFILLED paintable cells only.
-   *   3. Offscreen blit (palette colours for filled cells).
-   *
-   * The gridlines sit UNDER the palette colours so a filled cell
-   * shows its true palette colour with no edge tint. Previously the
-   * lines were stroked on top, which made every filled cell's
-   * outline ~12% darker than its interior — the "stuck highlight"
-   * the user reported on the last-tapped cell (it was actually
-   * present on every filled cell; the contiguous painted region
-   * just made it most visible at the boundary).
+   *   2. Offscreen blit — fills paintable cells; -1 and unfilled+no-
+   *      hint cells stay transparent so the white shows through.
+   *   3. Gridlines on EVERY paintable cell. Drawn AFTER the blit so
+   *      filled cells get a visible hairline border too — critical
+   *      when cells are white or painted white. Skipped at
+   *      pxPerCell < 6 where the lines alias into noise.
+   *   4. Per-cell faded MOZAI logo tile on every -1 cell. The same
+   *      viewport-bounded loop the gridlines use; skipped at
+   *      pxPerCell < BG_LOGO_MIN_PX_PER_CELL where the tile is
+   *      sub-pixel.
+   *   5. Selection outlines (only when a hint is unlocked).
+   *   6. Minimap.
    */
   draw(): boolean {
     const { ctx, canvas, camera } = this;
@@ -231,15 +450,117 @@ export class PaintRenderer {
     const dstW = this.state.puzzle.w * pxPerCell;
     const dstH = this.state.puzzle.h * pxPerCell;
 
-    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
-    // Selection overlay sits ABOVE the palette colours — it must
-    // remain visible on painted cells too (well, no, painted cells
-    // of the selected colour are skipped — see the implementation).
+    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
+    this.drawBackgroundLogos(bsW, bsH, pxPerCell, dstX, dstY);
     this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
 
-    this.framesPainted++;
+    this.drawMinimap();
+
     return true;
+  }
+
+  /**
+   * Faded MOZAI app-logo drawn into every visible -1 BACKGROUND
+   * cell so the empty field reads as visibly different from a
+   * white paintable cell. The faded variant is pre-baked once at
+   * icon-load time, so this loop is just per-cell drawImage with
+   * no alpha-state changes.
+   *
+   * Performance gates (in the order they short-circuit):
+   *   • pxPerCell < BG_LOGO_MIN_PX_PER_CELL → sub-pixel rendering
+   *     would be invisible AND would dominate the frame on huge
+   *     grids; skip entirely.
+   *   • logo asset not yet loaded → register a redraw callback and
+   *     no-op for this frame.
+   *   • iteration is bounded by the VISIBLE cell range, never the
+   *     full grid: a 1000×1000 puzzle at zoom 12 still touches
+   *     only ~viewport_w/12 × viewport_h/12 cells per frame.
+   */
+  private drawBackgroundLogos(
+    bsW: number,
+    bsH: number,
+    pxPerCell: number,
+    dstX: number,
+    dstY: number,
+  ): void {
+    if (pxPerCell < BG_LOGO_MIN_PX_PER_CELL) return;
+    const logo = getBackgroundLogo(() => this.scheduleFrame());
+    if (!logo) return;
+
+    const { ctx, state, camera } = this;
+    const puzzleW = state.puzzle.w;
+    const puzzleH = state.puzzle.h;
+    const cellsAcross = bsW / pxPerCell;
+    const cellsDown = bsH / pxPerCell;
+    const cx0 = Math.max(0, Math.floor(camera.offsetX));
+    const cx1 = Math.min(puzzleW, Math.ceil(camera.offsetX + cellsAcross) + 1);
+    const cy0 = Math.max(0, Math.floor(camera.offsetY));
+    const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
+    const sz = Math.round(pxPerCell);
+    for (let cy = cy0; cy < cy1; cy++) {
+      const py = Math.round(dstY + cy * pxPerCell);
+      const rowBase = cy * puzzleW;
+      for (let cx = cx0; cx < cx1; cx++) {
+        if (state.solution[rowBase + cx] !== -1) continue;
+        const px = Math.round(dstX + cx * pxPerCell);
+        ctx.drawImage(logo, px, py, sz, sz);
+      }
+    }
+  }
+
+  /**
+   * Paint the minimap (if set): scaled offscreen + viewport overlay
+   * rect. Cheap — the scale-down is a single drawImage and the rect
+   * is one strokeRect. Caller controls visibility (this paints
+   * unconditionally when a minimap canvas is bound).
+   */
+  private drawMinimap(): void {
+    const canvas = this.minimap;
+    const ctx = this.minimapCtx;
+    if (!canvas || !ctx) return;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (cssW === 0 || cssH === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    const bsW = Math.max(1, Math.round(cssW * dpr));
+    const bsH = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== bsW) canvas.width = bsW;
+    if (canvas.height !== bsH) canvas.height = bsH;
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, bsW, bsH);
+
+    const puzzleW = this.state.puzzle.w;
+    const puzzleH = this.state.puzzle.h;
+    const scale = Math.min(bsW / puzzleW, bsH / puzzleH);
+    const drawnW = puzzleW * scale;
+    const drawnH = puzzleH * scale;
+    const offX = (bsW - drawnW) / 2;
+    const offY = (bsH - drawnH) / 2;
+
+    ctx.imageSmoothingEnabled = false;
+    // Use the MINIMAP offscreen (grayscale unpainted + true colour
+    // painted) — NOT the main offscreen (whose unpainted cells are
+    // transparent). The minimap is too small for the per-cell BG
+    // logos that distinguish -1 from paintable on the main canvas,
+    // so palette grayscale carries that information here.
+    ctx.drawImage(this.minimapOffscreen, offX, offY, drawnW, drawnH);
+
+    // Viewport rectangle: maps the visible cell range in the main
+    // canvas to the minimap. Clamped to the puzzle area so a
+    // wider-than-puzzle viewport (fit-zoom on a tall puzzle) still
+    // shows a sensible box.
+    const visibleW = this.canvas.clientWidth / this.camera.zoom;
+    const visibleH = this.canvas.clientHeight / this.camera.zoom;
+    const rx = offX + Math.max(0, this.camera.offsetX) * scale;
+    const ry = offY + Math.max(0, this.camera.offsetY) * scale;
+    const rw = Math.min(puzzleW - Math.max(0, this.camera.offsetX), visibleW) * scale;
+    const rh = Math.min(puzzleH - Math.max(0, this.camera.offsetY), visibleH) * scale;
+
+    ctx.strokeStyle = 'rgba(20, 30, 45, 0.9)';
+    ctx.lineWidth = Math.max(1, Math.round(dpr));
+    ctx.strokeRect(rx + 0.5, ry + 0.5, Math.max(0, rw - 1), Math.max(0, rh - 1));
   }
 
   /**
@@ -328,25 +649,23 @@ export class PaintRenderer {
     ctx.stroke();
   }
 
-  /** Total frames the renderer has actually painted. Diagnostic. */
-  framesPainted = 0;
-
   /**
-   * Faint per-cell outlines on UNFILLED paintable cells only, so the
-   * player can see the discrete cells to tap. Drawn BEFORE the
-   * offscreen blit (see draw()) so filled cells' palette colours
-   * paint over the lines — finished cells show pure palette colour
-   * with no edge tint. Background cells (-1) are also skipped: they
-   * aren't paintable so showing them as a tappable grid would
-   * mislead.
+   * Light-grey hairline outlines on EVERY paintable cell. Drawn
+   * AFTER the offscreen blit (see draw()) so painted cells —
+   * including pure-white palette entries — still read as discrete
+   * cells. Background (-1) cells are explicitly skipped so the
+   * watermark + clean empty field stay intact.
    *
-   * Skipped entirely when cells are too small (< 4 backing px per
-   * cell) to avoid a solid-grey wash at extreme zoom-out on huge
-   * grids. Per-cell rect outlines keep the JS work bounded by the
-   * VISIBLE cell count, not the puzzle size.
+   * Skipped entirely when cells are too small (< 6 backing px per
+   * cell) to avoid the lines aliasing into noise at extreme
+   * zoom-out on huge grids — the cell-colour contrast and the
+   * watermark backdrop carry visual clarity at that zoom range.
+   * Per-cell rect outlines keep the JS work bounded by the
+   * VISIBLE cell count, not the puzzle size: one beginPath /
+   * stroke pair per frame, paths batched in between.
    */
   private drawGridlines(bsW: number, bsH: number, pxPerCell: number, dstX: number, dstY: number): void {
-    if (pxPerCell < 4) return;
+    if (pxPerCell < 6) return;
     const { ctx, state, camera } = this;
     const dpr = window.devicePixelRatio || 1;
     const puzzleW = state.puzzle.w;
@@ -358,7 +677,7 @@ export class PaintRenderer {
     const cy0 = Math.max(0, Math.floor(camera.offsetY));
     const cy1 = Math.min(puzzleH, Math.ceil(camera.offsetY + cellsDown) + 1);
 
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+    ctx.strokeStyle = '#d8d8d8';
     ctx.lineWidth = Math.max(1, Math.round(dpr));
     ctx.beginPath();
     const psz = Math.max(1, Math.round(pxPerCell) - 1);
@@ -367,8 +686,12 @@ export class PaintRenderer {
       const rowBase = cy * puzzleW;
       for (let cx = cx0; cx < cx1; cx++) {
         const i = rowBase + cx;
-        if (state.solution[i] < 0) continue;       // background — never paintable
-        if (state.filled[i]) continue;             // already painted — covered by blit
+        // Background cells never get a gridline: the watermark +
+        // clean empty field MUST stay legible there.
+        if (state.solution[i] < 0) continue;
+        // Filled cells DO get a gridline now (no skip): a white-
+        // painted cell needs the border to remain visible against
+        // the bright island.
         const px = Math.round(dstX + cx * pxPerCell) + 0.5;
         // Single rect path per cell — batched into one stroke().
         ctx.moveTo(px, py);
@@ -534,6 +857,34 @@ function parsePalette(palette: string[]): Uint8ClampedArray {
     out[i * 4] = r;
     out[i * 4 + 1] = g;
     out[i * 4 + 2] = b;
+    out[i * 4 + 3] = a;
+  }
+  return out;
+}
+
+/**
+ * Parse the hex palette into a flat Uint8ClampedArray of GRAYSCALE
+ * RGBA values (4 bytes per entry). Each palette colour is converted
+ * to its perceptual luminance via the standard Rec. 601 weighting,
+ * then stored as (luma, luma, luma, original_alpha). Used by the
+ * minimap offscreen so unpainted cells show the palette colour's
+ * grayscale silhouette — matching the room-interior thumb's
+ * grayscale-of-real-colour convention.
+ */
+function parsePaletteGray(palette: string[]): Uint8ClampedArray {
+  const rgba = parsePalette(palette);
+  const out = new Uint8ClampedArray(palette.length * 4);
+  for (let i = 0; i < palette.length; i++) {
+    const r = rgba[i * 4];
+    const g = rgba[i * 4 + 1];
+    const b = rgba[i * 4 + 2];
+    const a = rgba[i * 4 + 3];
+    // Rec. 601 luma — matches the room-interior thumbs (thumbs.ts
+    // renderThumb) so the silhouette greys agree across screens.
+    const luma = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
+    out[i * 4] = luma;
+    out[i * 4 + 1] = luma;
+    out[i * 4 + 2] = luma;
     out[i * 4 + 3] = a;
   }
   return out;

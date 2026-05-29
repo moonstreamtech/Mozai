@@ -5,23 +5,34 @@
  * the foundation's --banner-h (#game already excludes it) and the
  * bottom safe-area inset. Header has the back button + room number.
  *
- * Body: a responsive 3-col CSS grid of square tiles. Each tile holds a
- * small <canvas> rendered from the room's thumbs.json:
- *   • NOT completed → SILHOUETTE (grey shape on white)
- *   • Completed     → FULL COLOUR + a small check badge
+ * Body: a responsive 3-col CSS grid of square tiles. Each tile
+ * progresses through three visual states:
+ *   • LOADING   — small spinner; tile is non-tappable until the
+ *                 puzzle JSON has been downloaded and validated.
+ *   • READY     — thumb canvas painted from thumbs.json + the
+ *                 picture's saved filled-bitset (silhouette,
+ *                 grayscale-with-progress, or full colour).
+ *   • FAILED    — retry glyph; tap to re-attempt JUST this puzzle.
  *
- * Efficiency:
- *   • Only the room's slim thumbs.json is fetched. The full puzzle
- *     JSONs (which carry the heavy `cells` array) are NOT touched
- *     here — they load lazily when a tile is tapped in the next PR.
- *   • Tiles render lazily via IntersectionObserver: canvases are
- *     painted only when they intersect the scroll viewport (with a
- *     generous rootMargin so scrolling fast still keeps a paint-ahead
- *     buffer). Off-screen tiles stay empty <canvas> placeholders —
- *     cheap, and the dpr-sized backing store is allocated only when
- *     the tile actually becomes visible.
- *   • devicePixelRatio is applied to each canvas's backing store so
- *     the silhouettes stay crisp on Hi-DPI screens.
+ * Loading model:
+ *   1. thumbs.json + every picture's filled bitset load in parallel
+ *      (both are small and either bundled or local).
+ *   2. The grid renders immediately with all tiles in the LOADING
+ *      state.
+ *   3. The puzzle JSONs (rN/<id>.json) are then fetched ONE AT A
+ *      TIME, in display order, via loadPuzzle which routes through
+ *      the resolver's bundled → cache → CDN ladder. After each
+ *      success that tile transitions to READY; after the resolver
+ *      exhausts retries the tile transitions to FAILED. The room
+ *      is therefore usable with whatever loaded successfully even
+ *      if the network dies mid-room.
+ *
+ * Integrity:
+ *   • The resolver runs validatePuzzleText / validateThumbsText
+ *     against every response (cache OR network) before accepting it.
+ *     A schema-violating body is dropped on the floor and never
+ *     written to cache, so a corrupt blob can't poison subsequent
+ *     loads.
  *
  * Back navigation:
  *   • The back button calls ctx.back() which the scene manager
@@ -37,25 +48,23 @@ import type { PuzzleMeta } from './content.js';
 import { isCompleted } from './progress.js';
 import { loadFilledBitset } from './paint-state.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
-import { ContentResolveError } from './content.js';
-import { prefetchPuzzles } from './content-prefetch.js';
-import { diagLog } from './error-overlay.js';
+import { ContentResolveError, loadPuzzle } from './content.js';
 import { t } from './i18n.js';
 
-// Generous over-scan so a fast flick still finds the next tile painted.
-// 400 px ahead/behind the viewport is ~4 grid rows on a typical phone.
-const VIEWPORT_OVER_SCAN = '400px';
-
-interface TilePayload {
-  thumb: Thumb;
+interface PictureState {
   meta: PuzzleMeta;
   completed: boolean;
   filled: Uint8Array | null;
 }
 
-// Per-tile thumb payload. WeakMap so removing a tile from the DOM
-// releases the thumb reference for GC without manual bookkeeping.
-const thumbForTile = new WeakMap<HTMLElement, TilePayload>();
+interface TileEntry extends PictureState {
+  /** Per-puzzle thumb data from thumbs.json. */
+  thumb: Thumb | null;
+  /** Tile button element in the DOM. */
+  tile: HTMLButtonElement;
+  /** Current visual state. */
+  status: 'loading' | 'ready' | 'failed';
+}
 
 export function makeRoomSceneMount(target: RoomTarget): SceneMount {
   return (host, ctx) => {
@@ -63,12 +72,12 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     root.className = 'scene scene-room';
     root.innerHTML = `
       <header class="scene-header">
-        <button class="back-btn" type="button" aria-label="Back to rooms">
+        <button class="back-btn" type="button" aria-label="${t('backToRooms')}">
           <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
         </button>
-        <h1 class="scene-title">Room ${target.roomN}</h1>
+        <h1 class="scene-title">${t('room')} ${target.roomN}</h1>
         <span class="scene-spacer" aria-hidden="true"></span>
       </header>
       <div class="room-body"></div>
@@ -80,26 +89,20 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     back.addEventListener('click', onBack);
 
     const body = root.querySelector<HTMLDivElement>('.room-body')!;
-
-    // Loading placeholder. Replaced by the grid once thumbs.json
-    // resolves; replaced by an error state if the fetch fails.
     body.innerHTML = `<p class="scene-note">${t('loadingPictures')}</p>`;
 
     const pictures = ctx.index.rooms[String(target.roomN)] ?? [];
-
-    // Hold references to per-tile rendering jobs so we can cancel
-    // them on teardown.
     let cancelled = false;
-    let intersectionObserver: IntersectionObserver | null = null;
+    const isCancelled = () => cancelled;
 
     // Load thumbs + every picture's painted-state bitset in
     // parallel. Each tile's grayscale-of-real-color preview needs
     // BOTH — the thumb palette/cells AND that picture's saved
-    // filled bitset — so we wait for both before rendering. The
-    // bitset loads are cheap (RLE-decoded Uint8Array from
-    // Preferences); per-picture loadFilledBitset returns null
-    // when no saved state exists (never-opened pictures render
-    // fully grayscale).
+    // filled bitset. Bitset loads are local-storage reads (cheap)
+    // and the thumbs file is small (~9 KB per room), so parallel
+    // is fine here — the SEQUENTIAL-loading guarantee applies to
+    // the full puzzle JSONs below, which are the heavy network
+    // traffic on rooms 2+.
     Promise.all([
       loadRoomThumbs(target.roomN),
       Promise.all(
@@ -112,59 +115,63 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         }),
       ),
     ])
-      .then(([bundle, pictureStates]) => {
+      .then(async ([bundle, pictureStates]) => {
         if (cancelled) return;
-        intersectionObserver = renderGrid(body, pictureStates, bundle, ctx);
-        // Background prefetch — kick off downloading every puzzle in
-        // this room into the cache so taps are instant and the room
-        // works offline after this first visit. Runs concurrently
-        // with the user browsing; doesn't block the silhouette grid.
-        startRoomPrefetch(body, target.roomN, pictures, () => cancelled);
+        const entries = renderPlaceholderGrid(body, pictureStates, bundle);
+        // Sequentially fetch every puzzle JSON, render its thumb
+        // as it arrives. Strict order: a fast first-tile fetch
+        // never overtakes a slow earlier one in the visual fill-in.
+        await loadPuzzlesSequentially(entries, ctx, isCancelled);
       })
       .catch((err) => {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] thumbs load failed', err);
-        // Distinguish "offline + uncached" (show needs-internet) from
-        // a real data error (show the generic couldNotLoad). Both
-        // get the same Retry button — the resolver will try the
-        // network again on a fresh attempt.
-        const message =
-          err instanceof ContentResolveError
-            ? t('needsInternet')
-            : t('couldNotLoadThumbs', { n: target.roomN });
+        // The localised message stays the primary readable line.
+        // Below it, on a smaller / lighter sub-line, we show the
+        // resolver's reason code + the failing file basename so a
+        // device-side debug session can see WHAT actually went
+        // wrong (network:404, validation:cells_length_mismatch, …)
+        // without needing the removed debug overlay back. The
+        // reason code is intentionally NOT translated — it's a
+        // compact diagnostic token, not user-facing copy.
+        const reason = err instanceof ContentResolveError ? err.reason : 'unknown';
+        const basename = err instanceof ContentResolveError ? fileBasename(err.path) : '';
+        const detail = basename ? `${reason} (${basename})` : reason;
         body.innerHTML = `
           <p class="scene-note scene-error">
-            ${message}<br>
+            ${t('roomLoadFailed')}<br>
+            <span class="scene-error-reason">${escapeHtml(detail)}</span><br>
             <button class="cta-btn" type="button" data-retry>${t('retry')}</button>
           </p>`;
         body.querySelector<HTMLButtonElement>('[data-retry]')?.addEventListener('click', () => {
-          // Re-mount the scene by routing forward to the same target.
-          ctx.push({ scene: 'room', roomN: target.roomN });
+          // Re-mount via REPLACE, not PUSH: a failed retry must not
+          // grow the history stack. The previous push-based form
+          // turned every retry tap into another "back" press the
+          // user later had to undo to leave the room.
+          ctx.replace({ scene: 'room', roomN: target.roomN });
         });
       });
 
     return () => {
       cancelled = true;
-      intersectionObserver?.disconnect();
       back.removeEventListener('click', onBack);
       root.remove();
     };
   };
 }
 
-interface PictureState {
-  meta: PuzzleMeta;
-  completed: boolean;
-  filled: Uint8Array | null;
-}
-
-function renderGrid(
+/**
+ * Build the grid with all tiles in the LOADING state. Tiles whose
+ * thumb is missing in the bundle (prebuild out of sync) render as a
+ * permanent error tile; everything else gets a spinner placeholder
+ * that will transition to READY or FAILED via loadPuzzlesSequentially.
+ */
+function renderPlaceholderGrid(
   host: HTMLElement,
   states: PictureState[],
   bundle: ThumbBundle,
-  ctx: SceneContext,
-): IntersectionObserver | null {
+): TileEntry[] {
   host.innerHTML = '';
 
   if (states.length === 0) {
@@ -172,7 +179,7 @@ function renderGrid(
     empty.className = 'scene-note';
     empty.textContent = t('noPicturesYet');
     host.appendChild(empty);
-    return null;
+    return [];
   }
 
   const grid = document.createElement('div');
@@ -180,78 +187,71 @@ function renderGrid(
   grid.setAttribute('role', 'list');
   host.appendChild(grid);
 
-  // IntersectionObserver paints tiles only when they're (almost) on
-  // screen. rootMargin gives us a paint-ahead buffer so scrolling
-  // fast doesn't reveal blank tiles. We render once per tile, then
-  // stop observing — re-painting on every scroll-by would cost more
-  // than the small persistent backing store.
-  const io = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const tile = entry.target as HTMLElement;
-        renderTileCanvas(tile);
-        io.unobserve(tile);
-      }
-    },
-    {
-      rootMargin: `${VIEWPORT_OVER_SCAN} 0px ${VIEWPORT_OVER_SCAN} 0px`,
-      threshold: 0,
-    },
-  );
-
+  const entries: TileEntry[] = [];
   for (const ps of states) {
-    const thumb = bundle[ps.meta.id];
+    const thumb = bundle[ps.meta.id] ?? null;
     if (!thumb) {
-      // A meta entry without a matching thumb means the prebuild was
-      // out-of-sync with the committed thumbs.json. Render an empty
-      // tile rather than crashing the whole room.
       grid.appendChild(buildErrorTile(ps.meta.id));
       continue;
     }
-    const tile = buildPictureTile(ps, thumb, ctx);
+    const tile = buildLoadingTile(ps.meta);
     grid.appendChild(tile);
-    io.observe(tile);
+    entries.push({ ...ps, thumb, tile, status: 'loading' });
   }
-
-  return io;
+  return entries;
 }
 
-function buildPictureTile(ps: PictureState, thumb: Thumb, ctx: SceneContext): HTMLButtonElement {
-  const { meta, completed, filled } = ps;
+/**
+ * Walk the entry list in order, awaiting each puzzle's resolver
+ * outcome before starting the next. A successful load transitions
+ * the tile to READY; a resolver failure (offline, cache miss,
+ * validation reject after exhausting retries) transitions to
+ * FAILED with a per-tile retry handler that re-runs just this one.
+ *
+ * Strictly sequential by design: concurrency=1 keeps the radio
+ * powered for one socket at a time on a flaky network, so a drop
+ * mid-room loses at most one in-flight request, never the whole
+ * queue.
+ */
+async function loadPuzzlesSequentially(
+  entries: TileEntry[],
+  ctx: SceneContext,
+  isCancelled: () => boolean,
+): Promise<void> {
+  for (const entry of entries) {
+    if (isCancelled()) return;
+    await loadOnePuzzleIntoTile(entry, ctx, isCancelled);
+  }
+}
+
+async function loadOnePuzzleIntoTile(
+  entry: TileEntry,
+  ctx: SceneContext,
+  isCancelled: () => boolean,
+): Promise<void> {
+  try {
+    await loadPuzzle(entry.meta);
+    if (isCancelled()) return;
+    markTileReady(entry, ctx);
+  } catch {
+    if (isCancelled()) return;
+    markTileFailed(entry, ctx, isCancelled);
+  }
+}
+
+/**
+ * Loading-state tile. Disabled (no click → preview), shows a
+ * spinner. Held in this state until the puzzle JSON downloads +
+ * validates successfully.
+ */
+function buildLoadingTile(meta: PuzzleMeta): HTMLButtonElement {
   const tile = document.createElement('button');
   tile.type = 'button';
-  tile.className = 'picture-tile' + (completed ? ' is-completed' : '');
+  tile.className = 'picture-tile is-loading';
   tile.setAttribute('role', 'listitem');
-  // aria-label reflects the new tri-state preview semantics: full
-  // colour, partial progress, or grayscale-only.
-  const ariaState = completed
-    ? 'completed'
-    : filled
-      ? 'in progress'
-      : 'not started';
-  tile.setAttribute('aria-label', `${meta.id}, ${ariaState}`);
-
-  const canvas = document.createElement('canvas');
-  canvas.className = 'picture-canvas';
-  tile.appendChild(canvas);
-  thumbForTile.set(tile, { thumb, meta, completed, filled });
-
-  if (completed) {
-    const check = document.createElement('span');
-    check.className = 'tile-check';
-    check.setAttribute('aria-hidden', 'true');
-    check.textContent = '✓';
-    tile.appendChild(check);
-  }
-
-  tile.addEventListener('click', () => {
-    // Hand the meta straight through to the paint scene. It'll lazy-
-    // load the full puzzle JSON itself when the colouring engine
-    // resumes / starts.
-    ctx.push({ scene: 'paint', meta });
-  });
-
+  tile.setAttribute('aria-label', `${meta.id}, ${t('picStateLoading')}`);
+  tile.disabled = true;
+  tile.innerHTML = `<span class="picture-tile-spinner" aria-hidden="true"></span>`;
   return tile;
 }
 
@@ -265,81 +265,124 @@ function buildErrorTile(id: string): HTMLButtonElement {
 }
 
 /**
- * Allocate the canvas backing store and paint it once.
- *
- * Sized from the tile's actual CSS pixel box × devicePixelRatio.
- * Reading getBoundingClientRect once per tile when it first enters
- * the viewport is cheap — every tile is the same CSS size (set by
- * .picture-canvas in style.css), so the layout has long since
- * stabilised by the time IntersectionObserver fires.
+ * Transition a tile from LOADING (or FAILED → retried) to READY:
+ * swap the placeholder for the thumb canvas + completion check,
+ * paint the thumb, wire the preview click handler.
  */
-function renderTileCanvas(tile: HTMLElement): void {
-  const canvas = tile.querySelector<HTMLCanvasElement>('.picture-canvas');
-  const payload = thumbForTile.get(tile);
-  if (!canvas || !payload) return;
+function markTileReady(entry: TileEntry, ctx: SceneContext): void {
+  entry.status = 'ready';
+  const tile = entry.tile;
+  tile.classList.remove('is-loading', 'is-failed');
+  if (entry.completed) tile.classList.add('is-completed');
+  tile.disabled = false;
+  const ariaState = entry.completed
+    ? t('picStateCompleted')
+    : entry.filled
+      ? t('picStateInProgress')
+      : t('picStateNotStarted');
+  tile.setAttribute('aria-label', `${entry.meta.id}, ${ariaState}`);
+
+  tile.replaceChildren();
+  const canvas = document.createElement('canvas');
+  canvas.className = 'picture-canvas';
+  tile.appendChild(canvas);
+  if (entry.completed) {
+    const check = document.createElement('span');
+    check.className = 'tile-check';
+    check.setAttribute('aria-hidden', 'true');
+    check.textContent = '✓';
+    tile.appendChild(check);
+  }
+  paintTileCanvas(canvas, entry);
+
+  // Replace any prior click listener (could exist from a previous
+  // FAILED → retry cycle). Using onclick for idempotent
+  // replacement; the prior listener (if any) is discarded.
+  tile.onclick = () => {
+    ctx.push({ scene: 'preview', meta: entry.meta });
+  };
+}
+
+/**
+ * Transition a tile to FAILED: retry glyph + tap-to-retry. Tapping
+ * resets to LOADING and re-runs loadOnePuzzleIntoTile for THIS
+ * entry only — other entries are unaffected.
+ */
+function markTileFailed(
+  entry: TileEntry,
+  ctx: SceneContext,
+  isCancelled: () => boolean,
+): void {
+  entry.status = 'failed';
+  const tile = entry.tile;
+  tile.classList.remove('is-loading');
+  tile.classList.add('is-failed');
+  tile.disabled = false;
+  tile.setAttribute('aria-label', `${entry.meta.id}, ${t('picStateFailed')}`);
+  tile.replaceChildren();
+  const retry = document.createElement('span');
+  retry.className = 'picture-tile-retry';
+  retry.setAttribute('aria-hidden', 'true');
+  retry.textContent = '⟳';
+  tile.appendChild(retry);
+  tile.onclick = () => {
+    if (isCancelled()) return;
+    // Reset to LOADING and retry just this puzzle. The other
+    // entries in the room are unaffected; the user is paying the
+    // cost of one fetch, not a whole-room re-attempt.
+    entry.status = 'loading';
+    tile.classList.remove('is-failed');
+    tile.classList.add('is-loading');
+    tile.disabled = true;
+    tile.replaceChildren();
+    const spinner = document.createElement('span');
+    spinner.className = 'picture-tile-spinner';
+    spinner.setAttribute('aria-hidden', 'true');
+    tile.appendChild(spinner);
+    tile.onclick = null;
+    loadOnePuzzleIntoTile(entry, ctx, isCancelled);
+  };
+}
+
+/**
+ * Allocate the canvas backing store and paint the thumb. Sized
+ * from the tile's actual CSS pixel box × devicePixelRatio so
+ * silhouettes stay crisp on Hi-DPI screens. Read of
+ * getBoundingClientRect is cheap — every tile is the same CSS
+ * size (set by .picture-canvas in style.css) so layout has long
+ * since stabilised by the time we get here.
+ */
+function paintTileCanvas(canvas: HTMLCanvasElement, entry: TileEntry): void {
+  if (!entry.thumb) return;
   const rect = canvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const w = Math.max(1, Math.round(rect.width * dpr));
   const h = Math.max(1, Math.round(rect.height * dpr));
   canvas.width = w;
   canvas.height = h;
-  renderThumb(canvas, payload.thumb, {
-    completed: payload.completed,
-    filled: payload.filled,
-    sourceW: payload.meta.w,
-    sourceH: payload.meta.h,
+  renderThumb(canvas, entry.thumb, {
+    completed: entry.completed,
+    filled: entry.filled,
+    sourceW: entry.meta.w,
+    sourceH: entry.meta.h,
   });
 }
 
 /**
- * Kick off background prefetch of every puzzle JSON in the room.
- * Appends a small `↓ N/M` indicator to the scene body that updates
- * as each puzzle resolves and hides itself when the queue drains.
- * Diag at the end:
- *   prefetch room<N>: <count> puzzles, ok=<n> failed=<n>
+ * `content/roomN/r2-001.json` → `r2-001`. Used to include the
+ * specific failing file in the on-device error sub-line so a
+ * load failure is traceable without the debug overlay.
  */
-function startRoomPrefetch(
-  body: HTMLElement,
-  roomN: number,
-  pictures: PuzzleMeta[],
-  isCancelled: () => boolean,
-): void {
-  if (pictures.length === 0) return;
-  const total = pictures.length;
-  const status = document.createElement('div');
-  status.className = 'prefetch-status';
-  status.setAttribute('aria-live', 'polite');
-  status.innerHTML = `↓ <span data-count>0/${total}</span>`;
-  body.appendChild(status);
-  const countEl = status.querySelector<HTMLSpanElement>('[data-count]');
+function fileBasename(path: string): string {
+  const slash = path.lastIndexOf('/');
+  const tail = slash >= 0 ? path.slice(slash + 1) : path;
+  const dot = tail.lastIndexOf('.');
+  return dot > 0 ? tail.slice(0, dot) : tail;
+}
 
-  let settled = 0;
-  prefetchPuzzles(pictures, {
-    concurrency: 2,
-    isCancelled,
-    onItem: () => {
-      settled++;
-      if (countEl) countEl.textContent = `${settled}/${total}`;
-    },
-  })
-    .then((result) => {
-      diagLog(
-        `prefetch room${roomN}: ${total} puzzles, ok=${result.ok} failed=${result.failed}`,
-      );
-      // Brief pause so the final "N/N" lands on screen, then fade
-      // the indicator out. If the scene tore down in the meantime
-      // the node is gone and we no-op.
-      if (status.isConnected) {
-        status.classList.add('prefetch-status-done');
-        setTimeout(() => {
-          if (status.isConnected) status.remove();
-        }, 600);
-      }
-    })
-    .catch((err) => {
-      diagLog(
-        `prefetch room${roomN}: threw ${(err as Error)?.message ?? err}`,
-      );
-      if (status.isConnected) status.remove();
-    });
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }

@@ -1,0 +1,84 @@
+# Auto-trigger CDN sync when content lands on main.
+#
+# Trigger: push to main whose diff includes any file under
+# public/content/. Effect: fires a repository_dispatch event of
+# type `sync-mozai-content` at moonstreamtech/moonstreamtech.github.io.
+# The receiving repo's existing sync-mozai-content.yml then mirrors
+# the new content into /mozai-content/ on the CDN host.
+#
+# Net effect for the developer: merging a content PR to main is
+# enough — the CDN updates on its own a minute or two later. No
+# manual "Run workflow" click on the website repo.
+#
+# Setup required (one-time):
+#   1. Create a Personal Access Token on the GitHub account with
+#      `repo` scope, restricted to the
+#      moonstreamtech/moonstreamtech.github.io repository (a
+#      fine-grained PAT works if it has Contents: read+write and
+#      Actions: read+write on that repo).
+#   2. Add the PAT as a repository secret on this repo
+#      (moonstreamtech/Mozai → Settings → Secrets and variables →
+#      Actions → New repository secret) with the name
+#      WEBSITE_SYNC_TOKEN.
+#   3. Confirm the website repo's sync-mozai-content.yml already
+#      has `on: repository_dispatch: types: [sync-mozai-content]`
+#      (it does from earlier PR-1 work).
+#
+# If the secret is missing the workflow exits cleanly with a clear
+# log message — content commits to main are never blocked by a
+# missing CDN-sync token.
+
+name: trigger-cdn-sync-on-main
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'public/content/**'
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check WEBSITE_SYNC_TOKEN secret
+        env:
+          WEBSITE_SYNC_TOKEN: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+        run: |
+          if [ -z "${WEBSITE_SYNC_TOKEN}" ]; then
+            cat <<'EOF'
+          WEBSITE_SYNC_TOKEN secret not configured. Skipping CDN auto-sync.
+
+          To enable:
+            1. Create a PAT with `repo` scope on
+               moonstreamtech/moonstreamtech.github.io.
+            2. Add it as a repository secret on this repo named
+               WEBSITE_SYNC_TOKEN.
+
+          Until that's set up, run the CDN sync manually on the
+          website repo: Actions → sync-mozai-content → Run workflow.
+          EOF
+            # Mark the rest of the job as a deliberate no-op via an
+            # env flag the next step checks. We do NOT fail the
+            # workflow — a missing optional secret must never block
+            # commits to main on unrelated content.
+            echo "SKIP_DISPATCH=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Fire repository_dispatch on the website repo
+        if: env.SKIP_DISPATCH != '1'
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.WEBSITE_SYNC_TOKEN }}
+          repository: moonstreamtech/moonstreamtech.github.io
+          event-type: sync-mozai-content
+          # Pass the commit SHA + author through so the receiving
+          # workflow can include them in its run notes.
+          client-payload: |
+            {
+              "source_sha": "${{ github.sha }}",
+              "source_ref": "${{ github.ref }}",
+              "source_actor": "${{ github.actor }}"
+            }

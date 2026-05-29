@@ -37,26 +37,22 @@ import { PaintState } from './paint-state.js';
 import { PaintRenderer, type CameraLimits } from './paint-render.js';
 import { PaintInput } from './paint-input.js';
 import { showRewarded } from './rewarded.js';
-import { diagLog } from './error-overlay.js';
 import type { PuzzleMeta } from './content.js';
 import { t } from './i18n.js';
 
 const SAVE_DEBOUNCE_MS = 400;
 /**
- * Guard window after the completion modal becomes visible. The
- * pointer-up of the painting drag that COMPLETED the puzzle can
- * arrive on top of the Done button and auto-dismiss the modal
- * before the user has even seen it. We reject any click during this
- * window AND require the click's pointerdown to have started on
- * the Done button itself (see makePaintSceneMount).
+ * Duration of the smooth zoom-to-fit animation that plays the moment
+ * the last cell is filled. Keeps the camera frozen to interactions
+ * during the reveal so the player can't fight the easing.
  */
-const COMPLETE_DISMISS_GUARD_MS = 500;
+const COMPLETION_REVEAL_MS = 400;
 
 /**
- * "Room N · seq" title used in the topbar and in the completion
- * card. Parses the picture id's `rN-...` form to extract the seq
- * suffix; `meta.room` already provides the room number from the
- * JSON. The "Room" word is localized via i18n.
+ * "Room N · seq" title used in the topbar. Parses the picture id's
+ * `rN-...` form to extract the seq suffix; `meta.room` already
+ * provides the room number from the JSON. The "Room" word is
+ * localized via i18n.
  */
 function pictureTitle(meta: PuzzleMeta): string {
   const dash = meta.id.indexOf('-');
@@ -71,7 +67,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     root.className = 'scene scene-paint';
     root.innerHTML = `
       <header class="paint-topbar">
-        <button class="back-btn" type="button" aria-label="Back to room">
+        <button class="back-btn" type="button" aria-label="${t('backToRoom')}">
           <svg class="back-icon" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M15 5 L8 12 L15 19" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
@@ -85,18 +81,18 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       <div class="paint-viewport">
         <canvas class="paint-canvas"></canvas>
         <div class="paint-zoom-controls" aria-hidden="true">
-          <button class="zoom-btn" type="button" data-zoom-out aria-label="Zoom out">−</button>
-          <button class="zoom-btn" type="button" data-zoom-in aria-label="Zoom in">+</button>
+          <button class="zoom-btn" type="button" data-zoom-out aria-label="${t('zoomOut')}">−</button>
+          <button class="zoom-btn" type="button" data-zoom-in aria-label="${t('zoomIn')}">+</button>
         </div>
         <div class="paint-loading" data-loading>${t('loadingPuzzle')}</div>
       </div>
-      <div class="paint-palette" role="toolbar" aria-label="Colour palette"></div>
-      <div class="paint-completion" data-completion hidden>
-        <div class="paint-completion-card">
-          <h2>${t('completeTitle')}</h2>
-          <p>${t('completeFinished', { name: `<strong>${pictureTitle(meta)}</strong>` })}</p>
-          <button class="cta-btn" type="button" data-dismiss-complete>${t('done')}</button>
+      <div class="paint-bottom-strip">
+        <div class="paint-palette" role="toolbar" aria-label="${t('colourPalette')}"></div>
+        <div class="paint-completion-banner" data-completion hidden>
+          <span class="paint-completion-banner-text">${t('completeTitle')}</span>
+          <button class="paint-completion-banner-btn" type="button" data-dismiss-complete>${t('done')}</button>
         </div>
+        <canvas class="paint-minimap" data-minimap aria-label="${t('minimap')}"></canvas>
       </div>
     `;
     host.appendChild(root);
@@ -107,10 +103,11 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     const loadingEl = root.querySelector<HTMLDivElement>('[data-loading]')!;
     const hintBtn = root.querySelector<HTMLButtonElement>('[data-hint]')!;
     const overallPctEl = root.querySelector<HTMLSpanElement>('[data-overall-pct]')!;
-    const completionEl = root.querySelector<HTMLDivElement>('[data-completion]')!;
+    const completionBannerEl = root.querySelector<HTMLDivElement>('[data-completion]')!;
     const zoomInBtn = root.querySelector<HTMLButtonElement>('[data-zoom-in]')!;
     const zoomOutBtn = root.querySelector<HTMLButtonElement>('[data-zoom-out]')!;
     const completionDismissBtn = root.querySelector<HTMLButtonElement>('[data-dismiss-complete]')!;
+    const minimapEl = root.querySelector<HTMLCanvasElement>('[data-minimap]')!;
 
     let state: PaintState | null = null;
     let renderer: PaintRenderer | null = null;
@@ -120,7 +117,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     let saveTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
-    // Hardening: the completion modal MUST NOT fire during initial
+    // Hardening: the completion banner MUST NOT fire during initial
     // load. Set true once the puzzle has been fully parsed AND
     // restored from saved state. attemptFill / onCellFilled are only
     // ever wired after load anyway (the linear flow below), so this
@@ -128,50 +125,32 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     // accidentally lets `state.snapshot().complete` short-circuit
     // before the picture is paintable.
     let loadFinished = false;
+    // Belt-and-braces: even with loadFinished as the inner gate, this
+    // outer flag makes onPuzzleCompleted strictly idempotent for the
+    // life of the scene. The reveal animation + banner only ever run
+    // ONCE per mount.
+    let completionShown = false;
 
     const onBack = () => doBack(ctx);
     back.addEventListener('click', onBack);
 
-    // "Done" / "Tamam" button: DISMISS the modal and stay on the
-    // finished picture so the user can keep viewing their artwork.
-    // Navigation back to the room is done via the back arrow /
-    // hardware back, not by auto-navigation here.
+    // Completion banner dismiss. The banner lives inside the bottom
+    // strip (not over the canvas), so the drag-tap-tail bug that
+    // plagued the old centred modal can't reach this button: a
+    // paint stroke's pointer is captured by the canvas and never
+    // sees the banner.
     //
-    // Anti-drag-tap guard: the pointer-up of the painting drag
-    // that COMPLETED the puzzle can land on top of the Done button
-    // (the modal becomes visible mid-stroke). The browser then
-    // synthesises a click on the button, auto-dismissing the modal
-    // before the user sees it. Two gates:
-    //   1. modalShownAt + COMPLETE_DISMISS_GUARD_MS — reject any
-    //      click for ~500 ms after the modal opens, regardless of
-    //      provenance.
-    //   2. donePointerArmed — true only after a `pointerdown`
-    //      START on the Done button itself. A drag that begins on
-    //      the canvas keeps the pointer captured by the canvas, so
-    //      the button never sees its own pointerdown — donePointerArmed
-    //      stays false and the synthesised click is rejected. A
-    //      deliberate, fresh tap on Done arms the button (new
-    //      pointerdown → click → dismiss).
-    let modalShownAt = 0;
-    let donePointerArmed = false;
-    const onDonePointerDown = () => {
-      donePointerArmed = true;
-    };
+    // "Tamam" now navigates back to the room-interior scene rather
+    // than just dismissing the banner. The 400 ms zoom-to-fit
+    // reveal that ran before the banner appeared has already given
+    // the player the "linger on finished art" beat; from this
+    // moment on, the natural next action is to pick another
+    // picture or see the next room unlock — both happen in the
+    // room scene. Reopening a completed picture later is unchanged
+    // (no banner, no animation, just fit-zoom + "✓ Done" in topbar).
     const onDismissComplete = () => {
-      const elapsed = Date.now() - modalShownAt;
-      if (elapsed < COMPLETE_DISMISS_GUARD_MS) {
-        diagLog(`done: click rejected (within ${COMPLETE_DISMISS_GUARD_MS}ms guard, elapsed=${elapsed}ms)`);
-        donePointerArmed = false;
-        return;
-      }
-      if (!donePointerArmed) {
-        diagLog('done: click rejected (no pointerdown on button — tail of paint drag)');
-        return;
-      }
-      donePointerArmed = false;
-      completionEl.hidden = true;
+      ctx.back();
     };
-    completionDismissBtn.addEventListener('pointerdown', onDonePointerDown);
     completionDismissBtn.addEventListener('click', onDismissComplete);
 
     const onHint = () => {
@@ -197,7 +176,6 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           state.revealHint(colorForHint);
           renderer.scheduleFrame();
           scheduleSave();
-          diagLog(`hint unlock: color=${colorForHint}`);
           showToast(root, t('hintUnlocked'));
         })
         .finally(() => {
@@ -210,8 +188,8 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     // 1.25 step (not 1.4): smaller per-tap step gives the user a
     // finer feel for the zoom, and lets ~6 taps span the full
     // minZoom→maxZoom range on a typical puzzle (1.25^6 ≈ 3.8x).
-    const onZoomIn = () => input?.zoomCentered(1.25, 'plus');
-    const onZoomOut = () => input?.zoomCentered(1 / 1.25, 'minus');
+    const onZoomIn = () => input?.zoomCentered(1.25);
+    const onZoomOut = () => input?.zoomCentered(1 / 1.25);
     zoomInBtn.addEventListener('click', onZoomIn);
     zoomOutBtn.addEventListener('click', onZoomOut);
 
@@ -220,64 +198,18 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       .then(async (puzzle) => {
         if (cancelled) return;
 
-        // Rich pre-construction diagnostic so a malformed puzzle is
-        // visible on device via the debug popup (and console). We
-        // inspect the RAW cells field to catch the exotic failure
-        // modes the previous guard couldn't reach — e.g. cells
-        // arrived as a string, or as an array of strings, or
-        // length-0, or all-(-1). Counting non-negative entries here
-        // gives the TRUE paintable count, which we cross-check
-        // against PaintState's computed value below.
-        const cells = puzzle.cells as unknown;
-        const cellsIsArray = Array.isArray(cells);
-        const cellsType = cellsIsArray ? 'array' : typeof cells;
-        const cellsLen = cellsIsArray ? (cells as unknown[]).length : -1;
-        let rawBg = 0;
-        let rawPaint = 0;
-        if (cellsIsArray) {
-          for (const v of cells as unknown[]) {
-            const n = typeof v === 'number' ? v : Number(v);
-            if (Number.isFinite(n) && n < 0) rawBg++;
-            else if (Number.isFinite(n) && n >= 0) rawPaint++;
-          }
-        }
-        diagLog(
-          `paint entry id=${puzzle.id} ` +
-            `cells.type=${cellsType} cells.length=${cellsLen} w*h=${puzzle.w * puzzle.h} ` +
-            `#(-1)=${rawBg} #(>=0)=${rawPaint} ` +
-            `palette.length=${puzzle.palette.length} ` +
-            `paintableCells(json)=${puzzle.paintableCells}`,
-        );
-
         state = new PaintState(puzzle);
         await state.load();
         if (cancelled) return;
-
-        const snap = state.snapshot();
-        diagLog(
-          `paint state id=${puzzle.id} ` +
-            `paintableCount(computed)=${snap.paintableCount} ` +
-            `filledCount=${snap.filledCount} ` +
-            `complete=${snap.complete}`,
-        );
-        if (snap.paintableCount === 0) {
-          diagLog(
-            `WARNING paintableCount=0 for ${puzzle.id} — treating as malformed, NOT firing completion.`,
-          );
-        }
-        if (rawPaint !== snap.paintableCount) {
-          // Cross-check: if PaintState's computed count disagrees
-          // with our raw scan, something is up. Log loudly so we
-          // can see it on device.
-          diagLog(
-            `WARNING paintable mismatch: raw scan=${rawPaint} vs PaintState=${snap.paintableCount} for ${puzzle.id}`,
-          );
-        }
 
         renderer = new PaintRenderer(canvas, state);
         // First fit pass — canvas already has its CSS size because the
         // .paint-viewport flex box sized it in the previous frame.
         limits = renderer.fitToScreen();
+        // Bind the minimap canvas. The renderer paints into it on
+        // every frame; the scene toggles visibility (hidden when
+        // the puzzle fully fits the viewport, shown otherwise).
+        renderer.setMinimap(minimapEl);
         input = new PaintInput({
           canvas,
           renderer,
@@ -296,7 +228,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
             // is only constructed AFTER load so this can only fire
             // post-load, but a future refactor that pre-wires the
             // input would be silently caught here.
-            if (completed && loadFinished) onPuzzleCompleted('cell-filled');
+            if (completed && loadFinished) onPuzzleCompleted();
           },
         });
 
@@ -332,17 +264,6 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           // post-mount fit needs to land NOW to clear the loading
           // overlay below.
           const painted = renderer.draw();
-          const viewportEl = root.querySelector<HTMLDivElement>('.paint-viewport');
-          const vRect = viewportEl?.getBoundingClientRect();
-          diagLog(
-            `paint fit: canvas client=${canvas.clientWidth}x${canvas.clientHeight} ` +
-              `backing=${canvas.width}x${canvas.height} ` +
-              `viewport=${vRect?.width.toFixed(0) ?? '?'}x${vRect?.height.toFixed(0) ?? '?'} ` +
-              `zoom=${renderer.camera.zoom.toFixed(2)} ` +
-              `fitMin=${newLimits.minZoom.toFixed(2)} ` +
-              `fitMax=${newLimits.maxZoom.toFixed(2)} ` +
-              `painted=${painted} frames=${renderer.framesPainted}`,
-          );
           if (painted) {
             loadingEl.hidden = true;
           }
@@ -358,11 +279,6 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         // overlay AFTER a successful paint (painted === true) so a
         // collapsed-viewport case stays visible until layout settles.
         const initialPainted = renderer.draw();
-        diagLog(
-          `paint init: canvas client=${canvas.clientWidth}x${canvas.clientHeight} ` +
-            `backing=${canvas.width}x${canvas.height} ` +
-            `painted=${initialPainted} frames=${renderer.framesPainted}`,
-        );
         if (initialPainted) {
           loadingEl.hidden = true;
         }
@@ -398,24 +314,79 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         if (cancelled) return;
         // eslint-disable-next-line no-console
         console.error('[Mozai] loadPuzzle failed', err);
-        // Offline + uncached → needs-internet panel with a Retry
-        // button that re-enters the same paint scene (which
-        // re-runs the resolver). Other errors get the generic
-        // "could not load <title>" message but still offer Retry.
-        const isOffline = err instanceof ContentResolveError;
-        const message = isOffline
-          ? t('needsInternet')
-          : t('couldNotLoadPuzzle', { id: pictureTitle(meta) });
+        // Localised message stays primary; the resolver's reason
+        // code goes on a smaller sub-line so a device-side debug
+        // session can see the precise cause without the removed
+        // debug overlay. Reason codes are NOT translated — they're
+        // compact diagnostic tokens (`validation:cells_length_mismatch`,
+        // `network:404`, …), not user-facing copy.
+        const reason = err instanceof ContentResolveError ? err.reason : 'unknown';
         loadingEl.innerHTML = `
-          ${message}<br>
+          ${t('couldNotLoadPuzzle', { id: pictureTitle(meta) })}<br>
+          <span class="scene-error-reason">${escapeHtml(`${reason} (${meta.id})`)}</span><br>
           <button class="cta-btn" type="button" data-paint-retry>${t('retry')}</button>
         `;
         loadingEl.classList.add('scene-error');
         loadingEl.querySelector<HTMLButtonElement>('[data-paint-retry]')?.addEventListener(
           'click',
-          () => ctx.push({ scene: 'paint', meta }),
+          // Re-mount via REPLACE: a failed retry must not grow the
+          // history stack — otherwise each tap adds a back-press the
+          // user has to undo.
+          () => ctx.replace({ scene: 'paint', meta }),
         );
       });
+
+    // Minimap pointer flow. The minimap lives in the bottom strip
+    // (sibling of the palette, NOT inside the paint viewport), so
+    // pointer events never reach the paint canvas — no z-stacking
+    // tricks needed. One unified flow handles tap-to-jump AND
+    // drag-to-pan:
+    //   • pointerdown → setPointerCapture, recentre once
+    //   • pointermove (while captured) → recentre on every event
+    //                                     (live drag-pan, redraw on
+    //                                     each move)
+    //   • pointerup / cancel           → end the drag
+    // A pure tap (down + immediate up, no move) lands a single
+    // recentre — same observable behaviour as the previous tap-only
+    // flow.
+    let minimapDragging = false;
+    const minimapRecentre = (clientX: number, clientY: number): void => {
+      if (!renderer) return;
+      const rect = minimapEl.getBoundingClientRect();
+      const local = renderer.minimapToWorld(clientX - rect.left, clientY - rect.top);
+      if (!local) return;
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      const visibleCellsW = cssW / renderer.camera.zoom;
+      const visibleCellsH = cssH / renderer.camera.zoom;
+      renderer.camera.offsetX = local.worldX - visibleCellsW / 2;
+      renderer.camera.offsetY = local.worldY - visibleCellsH / 2;
+      renderer.clampCamera();
+      renderer.scheduleFrame();
+    };
+    const onMinimapDown = (ev: PointerEvent) => {
+      if (input?.paused) return;
+      if (!renderer) return;
+      minimapDragging = true;
+      try { minimapEl.setPointerCapture(ev.pointerId); } catch { /* fine */ }
+      minimapRecentre(ev.clientX, ev.clientY);
+      ev.preventDefault();
+    };
+    const onMinimapMove = (ev: PointerEvent) => {
+      if (!minimapDragging) return;
+      minimapRecentre(ev.clientX, ev.clientY);
+      ev.preventDefault();
+    };
+    const onMinimapUp = (ev: PointerEvent) => {
+      if (!minimapDragging) return;
+      minimapDragging = false;
+      try { minimapEl.releasePointerCapture(ev.pointerId); } catch { /* fine */ }
+      ev.preventDefault();
+    };
+    minimapEl.addEventListener('pointerdown', onMinimapDown);
+    minimapEl.addEventListener('pointermove', onMinimapMove);
+    minimapEl.addEventListener('pointerup', onMinimapUp);
+    minimapEl.addEventListener('pointercancel', onMinimapUp);
 
     // ----- helpers -----
 
@@ -446,7 +417,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       swatch.type = 'button';
       swatch.className = 'swatch';
       swatch.dataset.idx = String(idx);
-      swatch.setAttribute('aria-label', `Colour ${idx + 1}`);
+      swatch.setAttribute('aria-label', t('colourLabel', { n: idx + 1 }));
       swatch.innerHTML = `
         <span class="swatch-dot" style="background:${state!.puzzle.palette[idx]}"></span>
         <span class="swatch-pct" data-pct>0%</span>
@@ -529,30 +500,36 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     }
 
     /**
-     * Single chokepoint for showing the completion modal. Every
-     * caller passes a `source` tag so any future spurious trigger is
-     * visible in the debug popup. We RE-CHECK state.isComplete()
-     * inside (not just at the call site) so the modal can never
-     * render in the not-actually-complete state even if a caller
-     * forgets the gate. The previous failure was a CSS one (the
-     * `hidden` attribute being overridden by `display: flex`); this
-     * guard is the JS-layer belt-and-braces.
+     * Reveal-then-banner completion flow. Fired only at the moment
+     * of the final paint stroke (NOT on resume of an already-
+     * completed picture). Three gates protect against spurious
+     * triggers:
+     *   1. caller passes `completed = true` from onCellFilled
+     *   2. loadFinished is set true only after a clean load+restore
+     *   3. completionShown latches false→true on first run so a
+     *      future refactor can never re-fire mid-session
+     *
+     * Sequence:
+     *   1. Mark completionShown and persist progress in parallel.
+     *   2. Lock all pan/zoom input (paint, pinch, +/-, minimap drag).
+     *   3. Animate camera to fit-zoom centred on the paintable
+     *      bounds over COMPLETION_REVEAL_MS — uninterruptible.
+     *   4. Recompute zoom limits (fit is the new minZoom anyway,
+     *      but the camera state changed so reset for safety).
+     *   5. Unlock input.
+     *   6. Swap palette → completion banner inside the bottom strip.
+     *
+     * The minimap stays visible throughout; the picture above the
+     * strip remains fully unobstructed by the banner (which sits
+     * in the freed-up palette space, NOT over the canvas).
      */
-    function onPuzzleCompleted(source: string): void {
-      if (!state) return;
-      const snap = state.snapshot();
+    async function onPuzzleCompleted(): Promise<void> {
+      if (!state || !renderer) return;
       const complete = state.isComplete();
-      diagLog(
-        `COMPLETE modal trigger: source=${source} isComplete=${complete} ` +
-          `filled=${snap.filledCount}/${snap.paintableCount} loadFinished=${loadFinished}`,
-      );
-      if (!complete || !loadFinished) {
-        diagLog('COMPLETE suppressed (state not complete or load unfinished)');
-        return;
-      }
-      completionEl.hidden = false;
-      modalShownAt = Date.now();
-      donePointerArmed = false;
+      if (!complete || !loadFinished) return;
+      if (completionShown) return;
+      completionShown = true;
+
       // Persist progress (best-effort) before notifying the global
       // progress store. markCompleted writes to a different key so
       // both must succeed for the room-select grid to update.
@@ -562,6 +539,80 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       ]).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn('[Mozai] completion persist threw', err);
+      });
+
+      // Lock pan/zoom while the reveal animation plays so the player
+      // can't fight the easing curve or land an accidental fill mid-
+      // transition. Minimap drag is gated on input?.paused too.
+      if (input) input.paused = true;
+      await animateZoomToFit(COMPLETION_REVEAL_MS);
+      if (cancelled) return;
+      // Camera moved; fit-zoom is now the active zoom. Recompute
+      // limits so subsequent user zooming sees the right minZoom.
+      if (renderer) limits = renderer.computeFitLimits();
+      if (input) input.paused = false;
+      // Swap palette (now empty — all colours hit 100% during the
+      // final stroke) for the completion banner. The minimap to the
+      // right stays put through the swap.
+      paletteEl.hidden = true;
+      completionBannerEl.hidden = false;
+    }
+
+    /**
+     * One-shot ease-out-cubic camera animation to fit-zoom centred
+     * on the paintable bounds. Used by the completion reveal — the
+     * one place we deliberately overwrite the user's camera state
+     * (every other code path preserves user pan/zoom across resize
+     * / completion / etc.).
+     *
+     * Resolves when the final frame lands OR when the scene tears
+     * down mid-animation (cancelled). The await in the caller
+     * naturally short-circuits via the early-return cancel checks.
+     */
+    function animateZoomToFit(durationMs: number): Promise<void> {
+      return new Promise((resolve) => {
+        if (!renderer || !state) {
+          resolve();
+          return;
+        }
+        const r = renderer;
+        const s = state;
+        const startZoom = r.camera.zoom;
+        const startOffsetX = r.camera.offsetX;
+        const startOffsetY = r.camera.offsetY;
+        const fit = r.computeFitLimits();
+        const endZoom = fit.minZoom;
+        const cssW = canvas.clientWidth;
+        const cssH = canvas.clientHeight;
+        const visW = cssW / endZoom;
+        const visH = cssH / endZoom;
+        const b = s.paintableBounds;
+        const w = s.puzzle.w;
+        const h = s.puzzle.h;
+        const centreX = b ? (b.minX + b.maxX + 1) / 2 : w / 2;
+        const centreY = b ? (b.minY + b.maxY + 1) / 2 : h / 2;
+        const endOffsetX = centreX - visW / 2;
+        const endOffsetY = centreY - visH / 2;
+        const start = performance.now();
+        const step = (now: number): void => {
+          if (cancelled || !renderer) {
+            resolve();
+            return;
+          }
+          const t = Math.min(1, (now - start) / durationMs);
+          // ease-out cubic — snappy at first, gentle landing.
+          const e = 1 - Math.pow(1 - t, 3);
+          renderer.camera.zoom = startZoom + (endZoom - startZoom) * e;
+          renderer.camera.offsetX = startOffsetX + (endOffsetX - startOffsetX) * e;
+          renderer.camera.offsetY = startOffsetY + (endOffsetY - startOffsetY) * e;
+          renderer.scheduleFrame();
+          if (t < 1) {
+            requestAnimationFrame(step);
+          } else {
+            resolve();
+          }
+        };
+        requestAnimationFrame(step);
       });
     }
 
@@ -583,11 +634,15 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       cancelled = true;
       back.removeEventListener('click', onBack);
       completionDismissBtn.removeEventListener('click', onDismissComplete);
-      completionDismissBtn.removeEventListener('pointerdown', onDonePointerDown);
       hintBtn.removeEventListener('click', onHint);
       zoomInBtn.removeEventListener('click', onZoomIn);
       zoomOutBtn.removeEventListener('click', onZoomOut);
+      minimapEl.removeEventListener('pointerdown', onMinimapDown);
+      minimapEl.removeEventListener('pointermove', onMinimapMove);
+      minimapEl.removeEventListener('pointerup', onMinimapUp);
+      minimapEl.removeEventListener('pointercancel', onMinimapUp);
       resizeObserver?.disconnect();
+      renderer?.setMinimap(null);
       input?.dispose();
       renderer?.dispose();
       if (saveTimer != null) {
@@ -628,4 +683,11 @@ function showToast(scene: HTMLElement, message: string): void {
 
 function doBack(ctx: SceneContext): void {
   ctx.back();
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
