@@ -51,6 +51,14 @@
         "h": 20,
         "colors": 3,
         "paintableCells": 180
+      },
+      {
+        "id": "r2-004",
+        "room": 2,
+        "w": 20,
+        "h": 20,
+        "colors": 5,
+        "paintableCells": 162
       }
     ],
     "3": [
