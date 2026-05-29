@@ -39,6 +39,7 @@
  */
 
 import type { ContentIndex, PuzzleMeta } from './content.js';
+import { subscribeContentEvent } from './content-events.js';
 
 export type SceneId = 'rooms' | 'room' | 'preview' | 'paint';
 
@@ -107,7 +108,15 @@ export interface SceneManagerOpts {
 
 export class SceneManager {
   private readonly host: HTMLElement;
-  private readonly index: ContentIndex;
+  /**
+   * Cached ContentIndex passed to every new scene's mount via
+   * `ctx.index`. Refreshed on every 'index-updated' event from the
+   * SWR pipeline so a scene that mounts AFTER loadContentIndex's
+   * background revalidate detected new content sees the live
+   * index, not the bundled one. (Currently-mounted scenes get
+   * the same update via their own 'index-updated' subscription.)
+   */
+  private index: ContentIndex;
   private readonly registry: SceneRegistry;
   /** Navigation history. Index 0 is the root, top is the current scene. */
   private history: SceneTarget[] = [];
@@ -118,6 +127,11 @@ export class SceneManager {
     this.host = opts.host;
     this.index = opts.index;
     this.registry = opts.registry;
+    // Singleton subscription for the SceneManager itself. No
+    // unsubscribe — the manager lives for the app's full lifetime.
+    subscribeContentEvent('index-updated', (next) => {
+      this.index = next;
+    });
   }
 
   /** Start at the room-select scene. Safe to call once at boot. */

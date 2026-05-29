@@ -49,6 +49,7 @@ import { isCompleted } from './progress.js';
 import { loadFilledBitset } from './paint-state.js';
 import { loadRoomThumbs, renderThumb, type Thumb, type ThumbBundle } from './thumbs.js';
 import { ContentResolveError, loadPuzzle } from './content.js';
+import { subscribeContentEvent } from './content-events.js';
 import { t } from './i18n.js';
 
 interface PictureState {
@@ -91,9 +92,20 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     const body = root.querySelector<HTMLDivElement>('.room-body')!;
     body.innerHTML = `<p class="scene-note">${t('loadingPictures')}</p>`;
 
-    const pictures = ctx.index.rooms[String(target.roomN)] ?? [];
     let cancelled = false;
     const isCancelled = () => cancelled;
+
+    // Mutable mount-scope state. SWR event handlers below need
+    // to mutate the picture list, the live thumbs bundle, the
+    // grid element, and the per-tile entries — all of which were
+    // previously scoped inside the initial Promise.all().then().
+    // Lifting them here lets the diff (added / removed / modified
+    // tiles) run incrementally on every 'thumbs-updated' /
+    // 'index-updated' event without rebuilding the grid.
+    let currentPictures: PuzzleMeta[] = ctx.index.rooms[String(target.roomN)] ?? [];
+    let currentBundle: ThumbBundle = {};
+    let entries: TileEntry[] = [];
+    let gridEl: HTMLDivElement | null = null;
 
     // Load thumbs + every picture's painted-state bitset in
     // parallel. Each tile's grayscale-of-real-color preview needs
@@ -103,10 +115,16 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     // is fine here — the SEQUENTIAL-loading guarantee applies to
     // the full puzzle JSONs below, which are the heavy network
     // traffic on rooms 2+.
+    //
+    // loadRoomThumbs is now SWR-enabled (see thumbs.ts) — it
+    // returns the bundled/cached bundle INSTANTLY and kicks off a
+    // background revalidate that fires 'thumbs-updated' if the
+    // live CDN copy differs. The subscription below catches that
+    // and diffs the tiles in place.
     Promise.all([
       loadRoomThumbs(target.roomN),
       Promise.all(
-        pictures.map(async (meta) => {
+        currentPictures.map(async (meta) => {
           if (isCompleted(meta.id)) {
             return { meta, completed: true, filled: null as Uint8Array | null };
           }
@@ -117,7 +135,10 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
     ])
       .then(async ([bundle, pictureStates]) => {
         if (cancelled) return;
-        const entries = renderPlaceholderGrid(body, pictureStates, bundle);
+        currentBundle = bundle;
+        const built = renderPlaceholderGrid(body, pictureStates, bundle);
+        entries = built.entries;
+        gridEl = built.grid;
         // Sequentially fetch every puzzle JSON, render its thumb
         // as it arrives. Strict order: a fast first-tile fetch
         // never overtakes a slow earlier one in the visual fill-in.
@@ -153,12 +174,121 @@ export function makeRoomSceneMount(target: RoomTarget): SceneMount {
         });
       });
 
+    /**
+     * Re-converge the in-DOM tile set against (currentPictures,
+     * currentBundle). Three diffs run in this order:
+     *
+     *   1. REMOVED   — id present in entries but missing from
+     *                  currentBundle. Tile is dropped from the DOM
+     *                  and from `entries`. CSS grid reflows the
+     *                  remaining tiles up by one slot.
+     *   2. MODIFIED  — same id in both, but the thumb's serialised
+     *                  JSON differs. Entry's thumb is replaced and
+     *                  the canvas is repainted in place. Status
+     *                  stays whatever it was; a loading/failed
+     *                  tile simply remembers the new thumb for the
+     *                  next time it transitions to ready.
+     *   3. ADDED     — id present in currentBundle AND backed by a
+     *                  meta in currentPictures, AND not yet in
+     *                  entries. Builds a LOADING placeholder tile,
+     *                  appends to the end of the grid, loads its
+     *                  filled bitset, then kicks off the per-tile
+     *                  sequential puzzle load. Order of additions
+     *                  follows currentPictures so the visual order
+     *                  is stable across SWR runs.
+     *
+     * Existing tiles' positions are never disturbed — user scroll
+     * position is preserved across all three diffs.
+     */
+    const diffAndApply = (): void => {
+      if (cancelled || !gridEl) return;
+      const grid = gridEl;
+      const freshIds = new Set(Object.keys(currentBundle));
+      const existingById = new Map(entries.map((e) => [e.meta.id, e]));
+
+      // 1. REMOVED.
+      for (const entry of [...entries]) {
+        if (!freshIds.has(entry.meta.id)) {
+          entry.tile.remove();
+          entries = entries.filter((e) => e !== entry);
+        }
+      }
+      // 2. MODIFIED.
+      for (const entry of entries) {
+        const fresh = currentBundle[entry.meta.id];
+        if (!fresh) continue;
+        if (JSON.stringify(fresh) === JSON.stringify(entry.thumb)) continue;
+        entry.thumb = fresh;
+        if (entry.status === 'ready') {
+          const canvas = entry.tile.querySelector<HTMLCanvasElement>('.picture-canvas');
+          if (canvas) paintTileCanvas(canvas, entry);
+        }
+      }
+      // 3. ADDED. Walk currentPictures (the index order) so the
+      //    visual order matches whatever the maker produced.
+      for (const meta of currentPictures) {
+        if (existingById.has(meta.id)) continue;
+        const thumb = currentBundle[meta.id];
+        if (!thumb) continue;
+        const tile = buildLoadingTile(meta);
+        grid.appendChild(tile);
+        const newEntry: TileEntry = {
+          meta,
+          completed: false,
+          filled: null,
+          thumb,
+          tile,
+          status: 'loading',
+        };
+        entries.push(newEntry);
+        // Async: load completed flag + bitset, then sequential
+        // puzzle load. Fire-and-forget — the tile's own status
+        // transitions surface failure inline.
+        void hydrateAndLoadAddedTile(newEntry, ctx, isCancelled);
+      }
+    };
+
+    // SWR subscriptions. Both events trigger the same diff
+    // function; the diff is idempotent so multiple events in
+    // quick succession converge correctly.
+    const offThumbs = subscribeContentEvent('thumbs-updated', (data) => {
+      if (data.roomN !== target.roomN) return;
+      currentBundle = data.bundle;
+      diffAndApply();
+    });
+    const offIndex = subscribeContentEvent('index-updated', (next) => {
+      currentPictures = next.rooms[String(target.roomN)] ?? [];
+      diffAndApply();
+    });
+
     return () => {
       cancelled = true;
+      offThumbs();
+      offIndex();
       back.removeEventListener('click', onBack);
       root.remove();
     };
   };
+}
+
+/**
+ * SWR-added tile path. Resolves the just-added picture's
+ * completion + filled bitset, then runs the per-tile sequential
+ * puzzle load. Cancellation-safe: every async step checks the
+ * scene's isCancelled flag and bails early.
+ */
+async function hydrateAndLoadAddedTile(
+  entry: TileEntry,
+  ctx: SceneContext,
+  isCancelled: () => boolean,
+): Promise<void> {
+  if (isCancelled()) return;
+  entry.completed = isCompleted(entry.meta.id);
+  if (!entry.completed) {
+    entry.filled = await loadFilledBitset(entry.meta.id, entry.meta.w * entry.meta.h);
+    if (isCancelled()) return;
+  }
+  await loadOnePuzzleIntoTile(entry, ctx, isCancelled);
 }
 
 /**
@@ -171,7 +301,7 @@ function renderPlaceholderGrid(
   host: HTMLElement,
   states: PictureState[],
   bundle: ThumbBundle,
-): TileEntry[] {
+): { entries: TileEntry[]; grid: HTMLDivElement | null } {
   host.innerHTML = '';
 
   if (states.length === 0) {
@@ -179,7 +309,7 @@ function renderPlaceholderGrid(
     empty.className = 'scene-note';
     empty.textContent = t('noPicturesYet');
     host.appendChild(empty);
-    return [];
+    return { entries: [], grid: null };
   }
 
   const grid = document.createElement('div');
@@ -198,7 +328,7 @@ function renderPlaceholderGrid(
     grid.appendChild(tile);
     entries.push({ ...ps, thumb, tile, status: 'loading' });
   }
-  return entries;
+  return { entries, grid };
 }
 
 /**
