@@ -221,6 +221,47 @@ export async function resolveContent(
   return { text: '', source: 'FAILED', reason: fetchOutcome.reason };
 }
 
+/**
+ * Fetch a path DIRECTLY from the CDN, bypassing both the bundled
+ * fast-path and the on-disk cache. Used by the SWR revalidate
+ * paths (loadContentIndex, loadRoomThumbs) — they always want to
+ * see what the CDN is currently serving, regardless of what was
+ * bundled at install or written to cache on the last fetch.
+ *
+ * On success the response is written to the read-through cache
+ * so the NEXT regular resolveContent() call short-circuits to the
+ * fresh value. For bundled paths (index.json, room1/*) this cache
+ * write is harmless but ignored by the normal resolveContent flow
+ * — the resolver only consults cache for non-bundled paths. SWR
+ * works there anyway via the in-memory caches in content.ts /
+ * thumbs.ts.
+ *
+ * Returns FAILED on any error (network, validator reject). Callers
+ * treat this as "no update, the stale value stays in use" and
+ * silently move on — SWR revalidate is best-effort by design.
+ */
+export async function fetchFromCdn(
+  path: string,
+  opts: ResolveOptions = {},
+): Promise<ResolveResult> {
+  const cacheKey = stripContentPrefix(path);
+  const cdnUrl = joinUrl(CDN_BASE, cacheKey);
+  const fetchOutcome = await fetchWithRetry(cdnUrl);
+  if (fetchOutcome.kind !== 'ok') {
+    return { text: '', source: 'FAILED', reason: fetchOutcome.reason };
+  }
+  const text = fetchOutcome.text;
+  const validate = opts.validate;
+  if (validate) {
+    const r = validate(text, path);
+    if (!r.ok) return { text: '', source: 'FAILED', reason: r.reason };
+    writeCache(cacheKey, text).catch(() => {});
+    return { text, parsed: r.value, source: 'network' };
+  }
+  writeCache(cacheKey, text).catch(() => {});
+  return { text, source: 'network' };
+}
+
 type FetchOutcome =
   | { kind: 'ok'; text: string }
   | { kind: 'failed'; reason: string };

@@ -19,7 +19,8 @@
  * vs a truly-corrupt-cache scenario) misled users.
  */
 
-import { resolveContent, type ValidatorResult } from './content-resolver.js';
+import { resolveContent, fetchFromCdn, type ValidatorResult } from './content-resolver.js';
+import { emitContentEvent } from './content-events.js';
 
 export interface PuzzleMeta {
   id: string;
@@ -219,18 +220,77 @@ function fail(path: string, reason: string, detail?: string): ValidatorResult<ne
 }
 
 /**
- * Fetch the content index. ALWAYS bundled — never fetched from the
- * CDN — so the home screen renders on a cold boot with no network.
+ * Fetch the content index — STALE-WHILE-REVALIDATE.
+ *
+ * First call returns the bundled index.json (instant; the home
+ * screen never blocks on the network). Then a background CDN
+ * fetch runs in parallel; if the live index differs from what we
+ * just returned, the in-memory copy is updated AND an
+ * 'index-updated' event is dispatched on the content-events bus
+ * so scenes can re-render with the new content (newly-unlocked
+ * rooms, newly-added puzzles).
+ *
+ * The revalidate is fire-and-forget — failure is silent (no
+ * thrown error reaches the user, no UI spinner / panel) because
+ * the bundled value already returned is fine.
  */
+let lastIndexSerialised: string | null = null;
+let indexRevalidateInFlight: Promise<void> | null = null;
+
 export async function loadContentIndex(): Promise<ContentIndex> {
   const path = 'content/index.json';
   const result = await resolveContent(path);
   if (result.source === 'FAILED') {
     throw new ContentResolveError(path, result.reason ?? 'unknown');
   }
+  const data = parseAndValidateIndex(result.text, path);
+  lastIndexSerialised = JSON.stringify(data);
+  // Fire-and-forget background revalidate. void marks it as
+  // intentionally unawaited so the eslint/no-floating-promises
+  // rule (if it ever lands) doesn't flag the SWR pattern.
+  void revalidateIndexInBackground();
+  return data;
+}
+
+/**
+ * Background revalidate for the content index. Always reaches the
+ * CDN — even on the very first launch where the bundled index
+ * also exists — because the CDN copy is the source of truth for
+ * what's currently published. Coalesced via in-flight promise so
+ * a tight burst of loadContentIndex() calls only triggers ONE
+ * revalidate.
+ */
+async function revalidateIndexInBackground(): Promise<void> {
+  if (indexRevalidateInFlight) return indexRevalidateInFlight;
+  const path = 'content/index.json';
+  indexRevalidateInFlight = (async () => {
+    try {
+      const result = await fetchFromCdn(path);
+      if (result.source !== 'network') return;
+      let fresh: ContentIndex;
+      try {
+        fresh = parseAndValidateIndex(result.text, path);
+      } catch {
+        return;
+      }
+      const freshSerialised = JSON.stringify(fresh);
+      if (freshSerialised === lastIndexSerialised) return;
+      lastIndexSerialised = freshSerialised;
+      emitContentEvent('index-updated', fresh);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[mozai] index revalidate failed:', err);
+    } finally {
+      indexRevalidateInFlight = null;
+    }
+  })();
+  return indexRevalidateInFlight;
+}
+
+function parseAndValidateIndex(text: string, path: string): ContentIndex {
   let data: ContentIndex;
   try {
-    data = JSON.parse(result.text) as ContentIndex;
+    data = JSON.parse(text) as ContentIndex;
   } catch (err) {
     throw new Error(`${path} parse failed — ${(err as Error)?.message ?? err}`);
   }

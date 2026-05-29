@@ -29,8 +29,9 @@
  */
 
 import type { SceneContext, SceneMount } from './scenes.js';
-import { isRoomUnlocked } from './content.js';
+import { isRoomUnlocked, type ContentIndex } from './content.js';
 import { completedCountForRoom } from './progress.js';
+import { subscribeContentEvent } from './content-events.js';
 import { t } from './i18n.js';
 
 const COLUMNS = 5;
@@ -64,35 +65,59 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
   const grid = root.querySelector<HTMLDivElement>('.rooms-grid')!;
   grid.style.setProperty('--rooms-columns', String(COLUMNS));
 
-  // Build cells in render order: 1..maxRoom. The CSS grid's
-  // `grid-auto-flow: row` + the fixed 5 columns lay them out
-  // left-to-right, top-to-bottom automatically.
-  const maxRoom = ctx.index.maxRoom;
-  for (let n = 1; n <= maxRoom; n++) {
-    grid.appendChild(buildRoomCell(n, ctx));
-  }
+  // Local index reference so the SWR 'index-updated' event can
+  // swap it in place without bouncing through SceneManager.index
+  // (which is set once at construction).
+  let currentIndex: ContentIndex = ctx.index;
+  let emptyEl: HTMLElement | null = null;
 
-  if (maxRoom === 0) {
-    // Empty-state fallback. Should only be hit before any puzzle JSON
-    // is committed — the build-content-index script logs the same
-    // condition.
-    const empty = document.createElement('p');
-    empty.className = 'rooms-empty';
-    empty.textContent = 'No content yet — add puzzle JSONs under public/content/.';
-    root.appendChild(empty);
-  }
+  const renderGrid = (): void => {
+    grid.replaceChildren();
+    const maxRoom = currentIndex.maxRoom;
+    for (let n = 1; n <= maxRoom; n++) {
+      grid.appendChild(buildRoomCell(n, currentIndex, ctx));
+    }
+    // Empty-state fallback. Should only be hit before any puzzle
+    // JSON is committed — the build-content-index script logs the
+    // same condition.
+    if (maxRoom === 0) {
+      if (!emptyEl) {
+        emptyEl = document.createElement('p');
+        emptyEl.className = 'rooms-empty';
+        emptyEl.textContent = 'No content yet — add puzzle JSONs under public/content/.';
+        root.appendChild(emptyEl);
+      }
+    } else if (emptyEl) {
+      emptyEl.remove();
+      emptyEl = null;
+    }
+  };
+
+  renderGrid();
+
+  // SWR subscription: when loadContentIndex's background revalidate
+  // detects new content (a new room unlocked, an existing room
+  // gained a puzzle, …), re-render the grid with the new index.
+  // No flicker — the previous tiles are replaced in one DOM swap,
+  // and progress counts stay correct because they're read off the
+  // (local, synchronous) progress store.
+  const offIndex = subscribeContentEvent('index-updated', (next) => {
+    currentIndex = next;
+    renderGrid();
+  });
 
   return () => {
+    offIndex();
     root.remove();
   };
 };
 
-function buildRoomCell(n: number, ctx: SceneContext): HTMLElement {
-  const total = ctx.index.rooms[String(n)]?.length ?? 0;
-  const done = completedCountForRoom(n, ctx.index);
+function buildRoomCell(n: number, index: ContentIndex, ctx: SceneContext): HTMLElement {
+  const total = index.rooms[String(n)]?.length ?? 0;
+  const done = completedCountForRoom(n, index);
   const unlocked =
     UNLOCK_ALL_ROOMS ||
-    isRoomUnlocked(n, (k) => completedCountForRoom(k, ctx.index));
+    isRoomUnlocked(n, (k) => completedCountForRoom(k, index));
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   const cell = document.createElement('button');

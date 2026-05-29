@@ -18,8 +18,9 @@
  * the caller has chosen (typically CSS width × dpr).
  */
 
-import { resolveContent, type ValidatorResult } from './content-resolver.js';
+import { resolveContent, fetchFromCdn, type ValidatorResult } from './content-resolver.js';
 import { ContentResolveError } from './content.js';
+import { emitContentEvent } from './content-events.js';
 
 export interface Thumb {
   w: number;
@@ -138,16 +139,36 @@ function failT(path: string, reason: string, detail?: string): ValidatorResult<n
 const bundleCache = new Map<number, Promise<ThumbBundle>>();
 
 /**
- * Fetch (and cache) a room's thumbs.json. Two callers for the same
- * room share the in-flight promise — no double fetch on rapid
- * back-and-forth navigation. Validated by validateThumbsText at
- * the resolver layer; the validator's return value is used
- * directly (no re-parse) and the cache is evicted on validation
- * failure.
+ * Fetch (and cache) a room's thumbs.json — STALE-WHILE-REVALIDATE.
+ *
+ * First call returns the bundled / cached value INSTANTLY (the
+ * room scene renders without waiting for the network), then a
+ * background CDN fetch runs in parallel. If the live thumbs differ
+ * from what we just returned, the in-memory bundleCache is updated
+ * AND a 'thumbs-updated' event is dispatched on the content-events
+ * bus so scene-room can append new tiles, remove removed ones, and
+ * update changed ones without rebuilding the entire grid.
+ *
+ * Coalesced via the existing bundleCache (in-flight promise stored
+ * there) plus a per-room revalidate map below, so a tight burst
+ * of loadRoomThumbs(N) calls only triggers one network fetch AND
+ * one revalidate.
+ *
+ * Revalidate failure is silent (no thrown error reaches the user).
  */
+const lastBundleSerialised = new Map<number, string>();
+const thumbsRevalidateInFlight = new Map<number, Promise<void>>();
+
 export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
   const cached = bundleCache.get(roomN);
-  if (cached) return cached;
+  if (cached) {
+    // Even on cache hit (within session) we want to kick off a
+    // revalidate — the first call already did, but a subsequent
+    // call from a different scene mount should ALSO see updates.
+    // The revalidate's own in-flight coalescing makes this cheap.
+    void revalidateThumbsInBackground(roomN);
+    return cached;
+  }
   const path = `content/room${roomN}/thumbs.json`;
   // A rejected promise is EVICTED from bundleCache so a retry from
   // the scene actually re-runs the resolver.
@@ -156,7 +177,11 @@ export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
       if (result.source === 'FAILED' || !result.parsed) {
         throw new ContentResolveError(path, result.reason ?? 'unknown');
       }
-      return result.parsed as ThumbBundle;
+      const bundle = result.parsed as ThumbBundle;
+      lastBundleSerialised.set(roomN, JSON.stringify(bundle));
+      // Fire-and-forget background revalidate.
+      void revalidateThumbsInBackground(roomN);
+      return bundle;
     })
     .catch((err) => {
       bundleCache.delete(roomN);
@@ -164,6 +189,45 @@ export function loadRoomThumbs(roomN: number): Promise<ThumbBundle> {
     });
   bundleCache.set(roomN, p);
   return p;
+}
+
+/**
+ * Background revalidate for a room's thumbs. Always reaches the
+ * CDN. Coalesced per room so multiple loadRoomThumbs(N) calls in
+ * quick succession only trigger one network fetch.
+ *
+ * On detected change: updates the in-memory bundleCache so
+ * subsequent loadRoomThumbs(N) within this session returns the
+ * fresh bundle, AND emits 'thumbs-updated' so the currently
+ * mounted scene-room can re-render the diff.
+ */
+async function revalidateThumbsInBackground(roomN: number): Promise<void> {
+  const existing = thumbsRevalidateInFlight.get(roomN);
+  if (existing) return existing;
+  const path = `content/room${roomN}/thumbs.json`;
+  const promise = (async () => {
+    try {
+      const result = await fetchFromCdn(path, { validate: validateThumbsText });
+      if (result.source !== 'network' || !result.parsed) return;
+      const fresh = result.parsed as ThumbBundle;
+      const freshSerialised = JSON.stringify(fresh);
+      if (freshSerialised === lastBundleSerialised.get(roomN)) return;
+      lastBundleSerialised.set(roomN, freshSerialised);
+      // Update bundleCache so subsequent loadRoomThumbs(N) within
+      // this session returns the fresh bundle. We replace the
+      // promise (not its resolved value) so the cache stays
+      // promise-shaped end-to-end.
+      bundleCache.set(roomN, Promise.resolve(fresh));
+      emitContentEvent('thumbs-updated', { roomN, bundle: fresh });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[mozai] thumbs revalidate failed for room ${roomN}:`, err);
+    } finally {
+      thumbsRevalidateInFlight.delete(roomN);
+    }
+  })();
+  thumbsRevalidateInFlight.set(roomN, promise);
+  return promise;
 }
 
 /** Render mode. */
