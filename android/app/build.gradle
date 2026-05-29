@@ -34,10 +34,10 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // TODO: auto-increment versionCode from the CI run number once
-        // we have a release cadence. Hardcoded to 1 for the foundation
-        // PR so local + CI builds produce reproducible artifacts.
-        versionCode 1
-        versionName "0.0.1"
+        // we have a release cadence. Bumped to 2 so Play accepts the next
+        // upload — each bundle must use a higher versionCode than the last.
+        versionCode 2
+        versionName "0.0.2"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
