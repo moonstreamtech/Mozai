@@ -30,9 +30,9 @@
  * Integrity:
  *   • The resolver runs validatePuzzleText / validateThumbsText
  *     against every response (cache OR network) before accepting it.
- *     A truncated or schema-violating body is dropped on the floor
- *     and never written to cache, so a corrupt blob can't poison
- *     subsequent loads.
+ *     A schema-violating body is dropped on the floor and never
+ *     written to cache, so a corrupt blob can't poison subsequent
+ *     loads.
  *
  * Back navigation:
  *   • The back button calls ctx.back() which the scene manager

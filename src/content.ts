@@ -80,7 +80,7 @@ export class ContentResolveError extends Error {
 /**
  * Hex colour regex used by every palette validator. Strict 6-digit
  * form — the prebuild generator only emits #rrggbb so anything else
- * (truncated `#fff`, alpha `#rrggbbaa`, RGBA tuples) is a sign of
+ * (short `#fff`, alpha `#rrggbbaa`, RGBA tuples) is a sign of
  * corruption.
  */
 const HEX6_RE = /^#[0-9a-fA-F]{6}$/;

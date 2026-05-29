@@ -1,7 +1,7 @@
 /*
  * Content resolver — decides bundled vs cache vs network for any
- * content file path, with integrity guarantees against truncated
- * or malformed bodies.
+ * content file path, with integrity guarantees against malformed
+ * bodies.
  *
  * Three resolution buckets:
  *
@@ -31,14 +31,18 @@
  *     cache write and returns FAILED. The cache is therefore
  *     guaranteed to only ever hold content that passed validation
  *     at write time.
- *   • The network path also checks Content-Length when the server
- *     supplies one — a truncated body (bytes received ≠ advertised)
- *     is treated as a transient failure and retried.
+ *   • A short / incomplete body is caught by the caller-supplied
+ *     validator's JSON.parse + schema check, NOT by a byte-level
+ *     compare against Content-Length. Transparent gzip on the CDN
+ *     means the header's byte count is the compressed size while
+ *     res.text() returns the decompressed string, so a length
+ *     compare fires false positives on every healthy gzipped
+ *     response.
  *
  * If all three fail (e.g. cache miss + network down on first room-2+
  * open), resolve returns `{ source: 'FAILED' }`. Scenes that catch
- * this surface a localized "needs internet" message + retry button
- * rather than crashing or rendering blank.
+ * this surface a localized error + retry button rather than
+ * crashing or rendering blank.
  *
  * The resolver does NOT throw on its own — every failure is a
  * `source: 'FAILED'` return. Callers throw `ContentResolveError`
@@ -238,45 +242,30 @@ async function fetchWithRetry(url: string): Promise<FetchOutcome> {
   for (let k = 1; k <= MAX_ATTEMPTS; k++) {
     const ctrl = new AbortController();
     const timeoutId = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
-    let transientFailure = false;
     try {
       const res = await fetch(url, { cache: 'no-store', signal: ctrl.signal });
       clearTimeout(timeoutId);
       if (res.ok) {
         const text = await res.text();
-        // Content-Length integrity check. A flaky connection can
-        // drop the socket after the headers but before the body
-        // fully arrives; on some browsers/WebViews this resolves
-        // with whatever bytes did make it. Compare the actual
-        // received byte length to the advertised Content-Length
-        // and treat a mismatch as a transient failure (retry, then
-        // bubble up as FAILED). Skipped when the server doesn't
-        // send Content-Length (chunked transfer): in that case the
-        // caller-supplied content validator catches truncation via
-        // JSON.parse / schema check.
-        const cl = res.headers.get('content-length');
-        if (cl !== null) {
-          const expected = parseInt(cl, 10);
-          if (Number.isFinite(expected)) {
-            const actual = new TextEncoder().encode(text).length;
-            if (actual !== expected) {
-              lastReason = `network:truncated:${actual}/${expected}`;
-              transientFailure = true;
-            }
-          }
-        }
-        if (!transientFailure) {
-          return { kind: 'ok', text };
-        }
-      } else {
-        // 4xx (except 408 request-timeout, 429 too-many-requests) is
-        // definitive — return without further retry.
-        const transient = res.status >= 500 || res.status === 408 || res.status === 429;
-        if (!transient) {
-          return { kind: 'failed', reason: `network:${res.status}` };
-        }
-        lastReason = `network:${res.status}`;
+        // No byte-count integrity check here: GitHub Pages (and
+        // any CDN with transparent gzip) sends the COMPRESSED size
+        // in Content-Length while res.text() returns the
+        // DECOMPRESSED string, so comparing lengths fires false
+        // positives on every healthy gzipped response. Real
+        // corruption — incomplete bodies, dropped sockets,
+        // half-arrived chunks — is caught one step later by
+        // JSON.parse (throws on incomplete JSON) and the schema
+        // validator (catches partial cell arrays, missing palette,
+        // wrong w/h, etc.).
+        return { kind: 'ok', text };
       }
+      // 4xx (except 408 request-timeout, 429 too-many-requests) is
+      // definitive — return without further retry.
+      const transient = res.status >= 500 || res.status === 408 || res.status === 429;
+      if (!transient) {
+        return { kind: 'failed', reason: `network:${res.status}` };
+      }
+      lastReason = `network:${res.status}`;
     } catch (err) {
       clearTimeout(timeoutId);
       // AbortError = our per-attempt timeout; "Failed to fetch"
