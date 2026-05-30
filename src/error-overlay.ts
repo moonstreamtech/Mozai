@@ -97,9 +97,34 @@ export function installErrorOverlay(): void {
   if (installed) return;
   installed = true;
   window.addEventListener('error', (e) => {
+    // "ResizeObserver loop limit exceeded" / "…completed with
+    // undelivered notifications" is a BENIGN browser notice — the
+    // observer simply deferred the rest of its work to the next frame,
+    // nothing actually broke, and the browser self-recovers. Chrome
+    // raises it as a global `error` event (empty filename, 0:0). We must
+    // NOT surface it as a fatal overlay: doing so buried the whole paint
+    // scene on tablets. Swallow it (log only); genuine errors still flow
+    // through to reportError below. Defence-in-depth — even if a stray
+    // ResizeObserver notice fires anywhere, it can never take down the UI.
+    if (isBenignResizeObserverError(e.message) || isBenignResizeObserverError((e.error as Error | undefined)?.message)) {
+      // eslint-disable-next-line no-console
+      console.warn('[Mozai] ignored benign ResizeObserver notice:', e.message);
+      return;
+    }
     reportError(`window.error @ ${e.filename}:${e.lineno}:${e.colno}`, e.error ?? e.message);
   });
   window.addEventListener('unhandledrejection', (e) => {
     reportError('unhandledrejection', e.reason);
   });
+}
+
+/**
+ * The two well-known benign ResizeObserver loop notices. These never
+ * indicate a real fault, so they must not trigger the fatal overlay.
+ */
+const BENIGN_RESIZE_OBSERVER =
+  /ResizeObserver loop (?:limit exceeded|completed with undelivered notifications)/;
+
+function isBenignResizeObserverError(message: unknown): boolean {
+  return typeof message === 'string' && BENIGN_RESIZE_OBSERVER.test(message);
 }
