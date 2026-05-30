@@ -117,6 +117,14 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     let saveTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
     let resizeObserver: ResizeObserver | null = null;
+    // rAF coalescing + last-observed size for the paint-viewport
+    // ResizeObserver. The refit work mutates layout-affecting state, so
+    // it MUST run outside the observer's synchronous delivery (see the
+    // observer below) or tablets trip "ResizeObserver loop limit
+    // exceeded".
+    let resizeRaf = 0;
+    let lastViewportW = -1;
+    let lastViewportH = -1;
     // Hardening: the completion banner MUST NOT fire during initial
     // load. Set true once the puzzle has been fully parsed AND
     // restored from saved state. attemptFill / onCellFilled are only
@@ -247,8 +255,22 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         // would otherwise re-clamp the camera and translate the
         // finished image by a few pixels. The "image still shifts
         // slightly downward on completion" symptom traces here.
-        resizeObserver = new ResizeObserver(() => {
-          if (!renderer) return;
+        // The refit below mutates layout-affecting state (the canvas
+        // backing store via draw(), and loadingEl.hidden). Running it
+        // SYNCHRONOUSLY inside the ResizeObserver callback can re-enter
+        // the observer within the same delivery cycle and trip Chrome's
+        // "ResizeObserver loop limit exceeded" — which fired reliably on
+        // tablet aspect ratios and, via the global error overlay, buried
+        // the whole paint scene. So we (a) ignore callbacks whose
+        // observed box hasn't actually changed (damps the width⇄height
+        // oscillation a tablet's aspect ratio can drive) and (b) defer
+        // the refit to requestAnimationFrame so the mutation lands
+        // OUTSIDE the observer's synchronous cycle. One coalesced rAF is
+        // kept in flight at a time. (Mirrors resize.ts, already loop-safe.)
+        const paintViewport = root.querySelector<HTMLElement>('.paint-viewport')!;
+        const applyResizeFit = () => {
+          resizeRaf = 0;
+          if (cancelled || !renderer) return;
           if (state && state.isComplete()) {
             renderer.draw();
             return;
@@ -259,16 +281,27 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           if (oldZoom > newLimits.maxZoom) renderer.camera.zoom = newLimits.maxZoom;
           renderer.clampCamera();
           limits = newLimits;
-          // Synchronous draw so the next frame paints with the new
-          // size; scheduleFrame would defer to rAF, but the first
-          // post-mount fit needs to land NOW to clear the loading
-          // overlay below.
+          // The first post-mount fit still clears the loading overlay,
+          // just one frame later than before — the synchronous draw() a
+          // few lines below already hides it on the common path.
           const painted = renderer.draw();
           if (painted) {
             loadingEl.hidden = true;
           }
+        };
+        resizeObserver = new ResizeObserver((entries) => {
+          const box = entries[0]?.contentRect;
+          const w = box ? box.width : paintViewport.clientWidth;
+          const h = box ? box.height : paintViewport.clientHeight;
+          // Sub-pixel deltas can't change the fit and are exactly what
+          // the loop produces — ignore them to break the oscillation.
+          if (Math.abs(w - lastViewportW) < 1 && Math.abs(h - lastViewportH) < 1) return;
+          lastViewportW = w;
+          lastViewportH = h;
+          if (resizeRaf !== 0) return; // a refit is already scheduled
+          resizeRaf = requestAnimationFrame(applyResizeFit);
         });
-        resizeObserver.observe(root.querySelector('.paint-viewport')!);
+        resizeObserver.observe(paintViewport);
 
         renderPalette();
         updateOverall();
@@ -642,6 +675,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       minimapEl.removeEventListener('pointerup', onMinimapUp);
       minimapEl.removeEventListener('pointercancel', onMinimapUp);
       resizeObserver?.disconnect();
+      if (resizeRaf !== 0) cancelAnimationFrame(resizeRaf);
       renderer?.setMinimap(null);
       input?.dispose();
       renderer?.dispose();
