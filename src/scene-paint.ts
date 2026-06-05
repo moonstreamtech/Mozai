@@ -36,6 +36,8 @@ import { markCompleted } from './progress.js';
 import { PaintState } from './paint-state.js';
 import { PaintRenderer, type CameraLimits } from './paint-render.js';
 import { PaintInput } from './paint-input.js';
+import { PaintPerf } from './paint-perf.js';
+import { isDebugReadoutEnabled } from './env.js';
 import { showRewarded } from './rewarded.js';
 import type { PuzzleMeta } from './content.js';
 import { t } from './i18n.js';
@@ -112,6 +114,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     let state: PaintState | null = null;
     let renderer: PaintRenderer | null = null;
     let input: PaintInput | null = null;
+    let paintPerf: PaintPerf | null = null;
     let limits: CameraLimits = { minZoom: 0.1, maxZoom: 48 };
     let selectedColor = -1;
     let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -240,6 +243,29 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           },
         });
 
+        // Diagnostic perf overlay — OFF by default; mounted only under
+        // the existing MOZAI_DEBUG build flag (the same switch that
+        // drives the app-level #debug readout). It instruments the
+        // paint hot path so the drag / pinch stutter can be read on a
+        // real device: FPS, draw() ms, draws/s vs pointermoves/s, grid
+        // and zoom. The renderer/input hold a null sink otherwise, so
+        // production pays only a per-draw / per-move null check.
+        if (isDebugReadoutEnabled()) {
+          const viewportEl = root.querySelector<HTMLElement>('.paint-viewport')!;
+          // Capture non-null refs for the deferred getInfo closure (the
+          // overlay timer fires after this synchronous block, where the
+          // outer let-narrowing no longer holds).
+          const r = renderer;
+          const s = state;
+          paintPerf = new PaintPerf(viewportEl, () => ({
+            w: s.puzzle.w,
+            h: s.puzzle.h,
+            zoom: r.camera.zoom,
+          }));
+          renderer.perf = paintPerf;
+          input.perf = paintPerf;
+        }
+
         // Re-fit on container resize (banner height changes, rotation,
         // keyboard) so the picture stays sensibly sized. We
         // deliberately do NOT call resetCameraToFit() here — that
@@ -271,6 +297,10 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         const applyResizeFit = () => {
           resizeRaf = 0;
           if (cancelled || !renderer) return;
+          // A real size change happened — refresh the renderer's cached
+          // viewport metrics so the hot paths (draw, clampCamera) read
+          // up-to-date values without touching layout per frame.
+          renderer.refreshViewMetrics();
           if (state && state.isComplete()) {
             renderer.draw();
             return;
@@ -383,10 +413,13 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     // recentre — same observable behaviour as the previous tap-only
     // flow.
     let minimapDragging = false;
+    // Minimap rect cached on pointerdown, reused for every drag move —
+    // no getBoundingClientRect reflow per minimap pointermove.
+    let minimapRectLeft = 0;
+    let minimapRectTop = 0;
     const minimapRecentre = (clientX: number, clientY: number): void => {
       if (!renderer) return;
-      const rect = minimapEl.getBoundingClientRect();
-      const local = renderer.minimapToWorld(clientX - rect.left, clientY - rect.top);
+      const local = renderer.minimapToWorld(clientX - minimapRectLeft, clientY - minimapRectTop);
       if (!local) return;
       const cssW = canvas.clientWidth;
       const cssH = canvas.clientHeight;
@@ -401,6 +434,9 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       if (input?.paused) return;
       if (!renderer) return;
       minimapDragging = true;
+      const rect = minimapEl.getBoundingClientRect();
+      minimapRectLeft = rect.left;
+      minimapRectTop = rect.top;
       try { minimapEl.setPointerCapture(ev.pointerId); } catch { /* fine */ }
       minimapRecentre(ev.clientX, ev.clientY);
       ev.preventDefault();
@@ -679,6 +715,7 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       renderer?.setMinimap(null);
       input?.dispose();
       renderer?.dispose();
+      paintPerf?.dispose();
       if (saveTimer != null) {
         clearTimeout(saveTimer);
         saveTimer = null;
