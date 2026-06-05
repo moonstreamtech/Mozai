@@ -72,6 +72,19 @@ const BG_LOGO_MIN_PX_PER_CELL = 12;
 
 const SILHOUETTE_RGBA: [number, number, number, number] = [192, 200, 209, 255];
 
+/**
+ * Cap on the effective devicePixelRatio used for the MAIN paint-canvas
+ * backing store. Very high-DPR phones (dpr 3+) blow the backing store
+ * up to a size where the per-frame white fill + offscreen blit + deco
+ * rebuild become fill-rate bound. 2.5 keeps nearest-neighbour pixel-art
+ * crisp while cutting backing-store area to ~44% of a dpr-3 buffer.
+ * Coordinate math (screenToCell, pan/zoom) is in CSS px and unaffected;
+ * only the render resolution changes. Single tunable knob. The minimap
+ * deliberately keeps full dpr (it is tiny, and minimapToWorld must agree
+ * with its backing store) — only the big canvas is capped.
+ */
+const MAX_PAINT_DPR = 2.5;
+
 // -------- Module-shared background-logo loader --------
 //
 // One image, one pre-faded offscreen canvas, shared by every
@@ -120,6 +133,16 @@ function getBackgroundLogo(onLoad: () => void): HTMLCanvasElement | null {
   // root, so the same URL works in production.
   img.src = new URL('mozai-icon.png', location.href).href;
   return null;
+}
+
+/**
+ * True once the faded background-logo asset has loaded. The decoration
+ * cache keys on this so it rebuilds the one time the logo pops in
+ * (otherwise a puzzle opened before the asset loaded would never show
+ * the watermark on a static camera).
+ */
+function isBackgroundLogoReady(): boolean {
+  return bgLogoFaded !== null;
 }
 
 export interface Camera {
@@ -191,6 +214,40 @@ export class PaintRenderer {
   private minimap: HTMLCanvasElement | null = null;
   private minimapCtx: CanvasRenderingContext2D | null = null;
 
+  // ---- Cached viewport metrics (hoisted layout reads) ----
+  // Refreshed ONLY on real size changes (refreshViewMetrics(), called
+  // from the scene ResizeObserver + lazily on the first draw) — never
+  // per pointermove or per frame. The hot paths (draw, clampCamera,
+  // drawMinimap viewport rect) read these instead of touching
+  // clientWidth / clientHeight / devicePixelRatio every event, so a
+  // drag / pinch causes zero forced reflow.
+  private viewCssW = 0;
+  private viewCssH = 0;
+  /** Effective (capped) dpr for the main canvas — see MAX_PAINT_DPR. */
+  private viewDpr = 1;
+
+  // ---- Decoration cache (gridlines + background-logo tiles) ----
+  // These depend ONLY on the camera (zoom + pan) and the static puzzle
+  // shape, NOT on which cells are painted. So during a paint stroke
+  // (camera fixed) they are identical every frame — we render them ONCE
+  // into this offscreen and blit it, skipping the per-visible-cell loops
+  // that dominated the old per-frame cost. Rebuilt only when the camera /
+  // backing-store size / logo-loaded state actually changes.
+  private decoCanvas: HTMLCanvasElement | null = null;
+  private decoCtx: CanvasRenderingContext2D | null = null;
+  private decoZoom = NaN;
+  private decoOffsetX = NaN;
+  private decoOffsetY = NaN;
+  private decoLogoReady = false;
+
+  // ---- Minimap silhouette cache ----
+  // The silhouette only changes when a CELL is painted, never on
+  // pan/zoom. Cache the scaled silhouette; per frame just blit it +
+  // stroke the (cheap, moving) "you are here" viewport rect.
+  private minimapCache: HTMLCanvasElement | null = null;
+  private minimapCacheCtx: CanvasRenderingContext2D | null = null;
+  private minimapCacheDirty = true;
+
   constructor(canvas: HTMLCanvasElement, state: PaintState) {
     this.canvas = canvas;
     this.state = state;
@@ -221,6 +278,25 @@ export class PaintRenderer {
     this.paletteRgbaGray = parsePaletteGray(state.puzzle.palette);
 
     this.rebuildBuffer();
+    // Best-effort first read; the canvas may not be laid out yet (CSS
+    // sizing lands after mount). draw() refreshes lazily when the cache
+    // is still empty, and the scene's ResizeObserver refreshes on every
+    // real size change thereafter.
+    this.refreshViewMetrics();
+  }
+
+  /**
+   * Re-read the canvas CSS box + devicePixelRatio and cache them. This
+   * is the ONLY place the renderer touches layout-reading DOM APIs, and
+   * it is called from cold paths only (construct + the scene's
+   * ResizeObserver + a lazy first-frame read) — NEVER per pointermove
+   * or per frame. Returns true if the cached box is non-empty.
+   */
+  refreshViewMetrics(): boolean {
+    this.viewCssW = this.canvas.clientWidth;
+    this.viewCssH = this.canvas.clientHeight;
+    this.viewDpr = Math.min(window.devicePixelRatio || 1, MAX_PAINT_DPR);
+    return this.viewCssW > 0 && this.viewCssH > 0;
   }
 
   /**
@@ -298,6 +374,7 @@ export class PaintRenderer {
     }
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0);
     this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0);
+    this.minimapCacheDirty = true;
   }
 
   /**
@@ -326,6 +403,10 @@ export class PaintRenderer {
     const cy = Math.floor(i / this.state.puzzle.w);
     this.offscreenCtx.putImageData(this.offscreenData, 0, 0, cx, cy, 1, 1);
     this.minimapOffscreenCtx.putImageData(this.minimapOffscreenData, 0, 0, cx, cy, 1, 1);
+    // A cell changed → the minimap silhouette is stale. (The deco cache
+    // is camera-keyed and unaffected by a fill, so it is NOT invalidated
+    // here — that is exactly why a paint stroke stays loop-free.)
+    this.minimapCacheDirty = true;
     this.scheduleFrame();
   }
 
@@ -378,6 +459,8 @@ export class PaintRenderer {
   setMinimap(canvas: HTMLCanvasElement | null): void {
     this.minimap = canvas;
     this.minimapCtx = canvas ? canvas.getContext('2d') : null;
+    // Force a silhouette re-render on (re)bind.
+    this.minimapCacheDirty = true;
     if (canvas) this.scheduleFrame();
   }
 
@@ -442,10 +525,14 @@ export class PaintRenderer {
     const perf = this.perf;
     const drawStart = perf ? performance.now() : 0;
     const { ctx, canvas, camera } = this;
-    const cssW = canvas.clientWidth;
-    const cssH = canvas.clientHeight;
+    // CACHED metrics — no per-frame layout read. Prime them lazily on
+    // the first frame (the canvas just got its CSS size); every real
+    // resize thereafter refreshes via the scene's ResizeObserver.
+    if (this.viewCssW === 0 || this.viewCssH === 0) this.refreshViewMetrics();
+    const cssW = this.viewCssW;
+    const cssH = this.viewCssH;
     if (cssW === 0 || cssH === 0) return false;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = this.viewDpr;
     const bsW = Math.max(1, Math.round(cssW * dpr));
     const bsH = Math.max(1, Math.round(cssH * dpr));
     if (canvas.width !== bsW) canvas.width = bsW;
@@ -462,10 +549,29 @@ export class PaintRenderer {
     const dstW = this.state.puzzle.w * pxPerCell;
     const dstH = this.state.puzzle.h * pxPerCell;
 
+    // One cheap GPU blit of the cached artwork raster at the camera
+    // transform — already handles pan (translate) + zoom (scale).
     ctx.drawImage(this.offscreen, dstX, dstY, dstW, dstH);
-    this.drawGridlines(bsW, bsH, pxPerCell, dstX, dstY);
-    this.drawBackgroundLogos(bsW, bsH, pxPerCell, dstX, dstY);
-    this.drawSelectionOutlines(bsW, bsH, pxPerCell, dstX, dstY);
+
+    // Gridlines + background-logo tiles come from the camera-keyed deco
+    // cache. On a paint stroke (camera fixed) this is a single blit with
+    // NO per-cell loop; the loops run only when the cache is (re)built,
+    // i.e. when the camera / size / logo-loaded state actually changed.
+    const deco = this.ensureDecoCache(bsW, bsH, pxPerCell, dstX, dstY);
+    if (deco) {
+      ctx.drawImage(deco, 0, 0);
+    } else {
+      // Context-creation fallback: draw decorations live (pre-cache
+      // behaviour). Correct, just not cached.
+      this.drawGridlines(ctx, bsW, bsH, pxPerCell, dstX, dstY);
+      this.drawBackgroundLogos(ctx, bsW, bsH, pxPerCell, dstX, dstY);
+    }
+
+    // Selection outlines depend on which cells are filled, so they
+    // can't be cached across a paint stroke — draw them live onto the
+    // main canvas. Cheap: gated on an unlocked hint + a current
+    // selection, iterating only that one colour's visible cells.
+    this.drawSelectionOutlines(ctx, bsW, bsH, pxPerCell, dstX, dstY);
 
     this.drawMinimap();
 
@@ -473,6 +579,57 @@ export class PaintRenderer {
     // bail above does not count as a frame).
     if (perf) perf.recordDraw(performance.now() - drawStart);
     return true;
+  }
+
+  /**
+   * Build (or reuse) the decoration cache — gridlines + background-logo
+   * tiles rendered into a transparent offscreen the size of the main
+   * backing store. Reused verbatim while the camera, backing-store size
+   * and logo-loaded state are unchanged; rebuilt (running the per-cell
+   * loops ONCE) when any of those change. Returns the cache canvas, or
+   * null if a 2D context could not be created (caller then draws live).
+   */
+  private ensureDecoCache(
+    bsW: number,
+    bsH: number,
+    pxPerCell: number,
+    dstX: number,
+    dstY: number,
+  ): HTMLCanvasElement | null {
+    if (!this.decoCanvas) {
+      this.decoCanvas = document.createElement('canvas');
+      this.decoCtx = this.decoCanvas.getContext('2d');
+    }
+    const dctx = this.decoCtx;
+    const cv = this.decoCanvas;
+    if (!dctx) return null;
+
+    const logoReady = isBackgroundLogoReady();
+    const sizeChanged = cv.width !== bsW || cv.height !== bsH;
+    // decoZoom starts as NaN so the first call always rebuilds.
+    const camChanged =
+      this.camera.zoom !== this.decoZoom ||
+      this.camera.offsetX !== this.decoOffsetX ||
+      this.camera.offsetY !== this.decoOffsetY;
+    const logoChanged = logoReady !== this.decoLogoReady;
+
+    if (sizeChanged || camChanged || logoChanged) {
+      if (sizeChanged) {
+        // Assigning width/height also clears the bitmap.
+        cv.width = bsW;
+        cv.height = bsH;
+      } else {
+        dctx.clearRect(0, 0, bsW, bsH);
+      }
+      dctx.imageSmoothingEnabled = false;
+      this.drawGridlines(dctx, bsW, bsH, pxPerCell, dstX, dstY);
+      this.drawBackgroundLogos(dctx, bsW, bsH, pxPerCell, dstX, dstY);
+      this.decoZoom = this.camera.zoom;
+      this.decoOffsetX = this.camera.offsetX;
+      this.decoOffsetY = this.camera.offsetY;
+      this.decoLogoReady = logoReady;
+    }
+    return cv;
   }
 
   /**
@@ -493,6 +650,7 @@ export class PaintRenderer {
    *     only ~viewport_w/12 × viewport_h/12 cells per frame.
    */
   private drawBackgroundLogos(
+    tctx: CanvasRenderingContext2D,
     bsW: number,
     bsH: number,
     pxPerCell: number,
@@ -503,7 +661,8 @@ export class PaintRenderer {
     const logo = getBackgroundLogo(() => this.scheduleFrame());
     if (!logo) return;
 
-    const { ctx, state, camera } = this;
+    const ctx = tctx;
+    const { state, camera } = this;
     const puzzleW = state.puzzle.w;
     const puzzleH = state.puzzle.h;
     const cellsAcross = bsW / pxPerCell;
@@ -543,9 +702,6 @@ export class PaintRenderer {
     if (canvas.width !== bsW) canvas.width = bsW;
     if (canvas.height !== bsH) canvas.height = bsH;
 
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, bsW, bsH);
-
     const puzzleW = this.state.puzzle.w;
     const puzzleH = this.state.puzzle.h;
     const scale = Math.min(bsW / puzzleW, bsH / puzzleH);
@@ -554,20 +710,54 @@ export class PaintRenderer {
     const offX = (bsW - drawnW) / 2;
     const offY = (bsH - drawnH) / 2;
 
-    ctx.imageSmoothingEnabled = false;
-    // Use the MINIMAP offscreen (grayscale unpainted + true colour
-    // painted) — NOT the main offscreen (whose unpainted cells are
-    // transparent). The minimap is too small for the per-cell BG
-    // logos that distinguish -1 from paintable on the main canvas,
-    // so palette grayscale carries that information here.
-    ctx.drawImage(this.minimapOffscreen, offX, offY, drawnW, drawnH);
+    // Silhouette cache: white background + the scaled-down minimap
+    // offscreen. This only changes when a CELL is painted
+    // (minimapCacheDirty) or the minimap backing store resizes — NEVER
+    // on pan/zoom. So a pan/zoom frame just blits this cache 1:1 and
+    // strokes the (cheap, moving) viewport rect below: no per-frame
+    // scale-down of the whole silhouette.
+    //
+    // The MINIMAP offscreen (grayscale unpainted + true-colour painted)
+    // is used — NOT the main offscreen (whose unpainted cells are
+    // transparent). The minimap is too small for the per-cell BG logos
+    // that distinguish -1 from paintable on the main canvas, so palette
+    // grayscale carries that information here.
+    if (!this.minimapCache) {
+      this.minimapCache = document.createElement('canvas');
+      this.minimapCacheCtx = this.minimapCache.getContext('2d');
+    }
+    const cacheCtx = this.minimapCacheCtx;
+    const cache = this.minimapCache;
+    if (cacheCtx && cache) {
+      const cacheSizeChanged = cache.width !== bsW || cache.height !== bsH;
+      if (this.minimapCacheDirty || cacheSizeChanged) {
+        if (cacheSizeChanged) {
+          cache.width = bsW;
+          cache.height = bsH;
+        }
+        cacheCtx.fillStyle = '#ffffff';
+        cacheCtx.fillRect(0, 0, bsW, bsH);
+        cacheCtx.imageSmoothingEnabled = false;
+        cacheCtx.drawImage(this.minimapOffscreen, offX, offY, drawnW, drawnH);
+        this.minimapCacheDirty = false;
+      }
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(cache, 0, 0);
+    } else {
+      // Context-creation fallback: render the silhouette live.
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, bsW, bsH);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(this.minimapOffscreen, offX, offY, drawnW, drawnH);
+    }
 
     // Viewport rectangle: maps the visible cell range in the main
     // canvas to the minimap. Clamped to the puzzle area so a
     // wider-than-puzzle viewport (fit-zoom on a tall puzzle) still
-    // shows a sensible box.
-    const visibleW = this.canvas.clientWidth / this.camera.zoom;
-    const visibleH = this.canvas.clientHeight / this.camera.zoom;
+    // shows a sensible box. Uses the CACHED main-canvas CSS size — no
+    // per-frame layout read.
+    const visibleW = this.viewCssW / this.camera.zoom;
+    const visibleH = this.viewCssH / this.camera.zoom;
     const rx = offX + Math.max(0, this.camera.offsetX) * scale;
     const ry = offY + Math.max(0, this.camera.offsetY) * scale;
     const rw = Math.min(puzzleW - Math.max(0, this.camera.offsetX), visibleW) * scale;
@@ -600,6 +790,7 @@ export class PaintRenderer {
    * frame budget. Zoomed-out hits the skip threshold first.
    */
   private drawSelectionOutlines(
+    tctx: CanvasRenderingContext2D,
     bsW: number,
     bsH: number,
     pxPerCell: number,
@@ -616,7 +807,8 @@ export class PaintRenderer {
     // unlock persists with paint state (PersistEnvelope.hints[]).
     if (!this.state.hintRevealed.has(sel)) return;
     if (pxPerCell < 8) return;
-    const { ctx, state } = this;
+    const ctx = tctx;
+    const { state } = this;
     const palettePos = sel * 4;
     if (palettePos < 0 || palettePos + 3 >= this.paletteRgba.length) return;
     const pr = this.paletteRgba[palettePos];
@@ -632,7 +824,7 @@ export class PaintRenderer {
     const cy0 = Math.max(0, Math.floor(this.camera.offsetY));
     const cy1 = Math.min(puzzleH, Math.ceil(this.camera.offsetY + cellsDown) + 1);
 
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = this.viewDpr;
     // Thin, flush. Same lineWidth as the gridlines themselves
     // (Math.max(1, round(dpr))) so the outline is exactly the
     // grid border in a different colour — no thicker frame.
@@ -679,10 +871,18 @@ export class PaintRenderer {
    * VISIBLE cell count, not the puzzle size: one beginPath /
    * stroke pair per frame, paths batched in between.
    */
-  private drawGridlines(bsW: number, bsH: number, pxPerCell: number, dstX: number, dstY: number): void {
+  private drawGridlines(
+    tctx: CanvasRenderingContext2D,
+    bsW: number,
+    bsH: number,
+    pxPerCell: number,
+    dstX: number,
+    dstY: number,
+  ): void {
     if (pxPerCell < 6) return;
-    const { ctx, state, camera } = this;
-    const dpr = window.devicePixelRatio || 1;
+    const ctx = tctx;
+    const { state, camera } = this;
+    const dpr = this.viewDpr;
     const puzzleW = state.puzzle.w;
     const puzzleH = state.puzzle.h;
     const cellsAcross = bsW / pxPerCell;
@@ -798,8 +998,11 @@ export class PaintRenderer {
    * — equivalent to "no empty void next to the puzzle on any side".
    */
   clampCamera(): void {
-    const cssW = this.canvas.clientWidth;
-    const cssH = this.canvas.clientHeight;
+    // Cached metrics — clampCamera runs on every pan/zoom move, so it
+    // must not read layout. The scene refreshes the cache (via
+    // refreshViewMetrics) on real resizes before clamping.
+    const cssW = this.viewCssW;
+    const cssH = this.viewCssH;
     if (cssW === 0 || cssH === 0) return;
     const visibleW = cssW / this.camera.zoom;
     const visibleH = cssH / this.camera.zoom;

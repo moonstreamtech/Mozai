@@ -297,6 +297,10 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         const applyResizeFit = () => {
           resizeRaf = 0;
           if (cancelled || !renderer) return;
+          // A real size change happened — refresh the renderer's cached
+          // viewport metrics so the hot paths (draw, clampCamera) read
+          // up-to-date values without touching layout per frame.
+          renderer.refreshViewMetrics();
           if (state && state.isComplete()) {
             renderer.draw();
             return;
@@ -409,10 +413,13 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
     // recentre — same observable behaviour as the previous tap-only
     // flow.
     let minimapDragging = false;
+    // Minimap rect cached on pointerdown, reused for every drag move —
+    // no getBoundingClientRect reflow per minimap pointermove.
+    let minimapRectLeft = 0;
+    let minimapRectTop = 0;
     const minimapRecentre = (clientX: number, clientY: number): void => {
       if (!renderer) return;
-      const rect = minimapEl.getBoundingClientRect();
-      const local = renderer.minimapToWorld(clientX - rect.left, clientY - rect.top);
+      const local = renderer.minimapToWorld(clientX - minimapRectLeft, clientY - minimapRectTop);
       if (!local) return;
       const cssW = canvas.clientWidth;
       const cssH = canvas.clientHeight;
@@ -427,6 +434,9 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
       if (input?.paused) return;
       if (!renderer) return;
       minimapDragging = true;
+      const rect = minimapEl.getBoundingClientRect();
+      minimapRectLeft = rect.left;
+      minimapRectTop = rect.top;
       try { minimapEl.setPointerCapture(ev.pointerId); } catch { /* fine */ }
       minimapRecentre(ev.clientX, ev.clientY);
       ev.preventDefault();

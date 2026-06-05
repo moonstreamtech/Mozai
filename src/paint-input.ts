@@ -90,6 +90,23 @@ export class PaintInput {
   /** Midpoint of two pointers at gesture start (CSS px, canvas-local). */
   private gestureStartMidX = 0;
   private gestureStartMidY = 0;
+  /**
+   * Cached canvas top-left (CSS px), refreshed once per gesture in
+   * handleDown / handleWheel — NOT per pointermove. getBoundingClientRect
+   * forces a synchronous reflow; calling it on every move event of a
+   * drag/pinch (60–120+/s) was a per-event reflow. The canvas does not
+   * move mid-gesture in this scene's layout, so a per-gesture refresh is
+   * exact.
+   */
+  private rectLeft = 0;
+  private rectTop = 0;
+  /**
+   * Reusable scratch objects so the pointermove hot path allocates
+   * nothing. Each is consumed by its caller immediately (single-threaded,
+   * no escape), so sharing one instance is safe.
+   */
+  private readonly scratchPos = { x: 0, y: 0 };
+  private readonly scratchCell = { cx: 0, cy: 0 };
   /** Bound listener refs for clean removal. */
   private readonly onDown: (e: PointerEvent) => void;
   private readonly onMove: (e: PointerEvent) => void;
@@ -124,13 +141,28 @@ export class PaintInput {
     canvas.removeEventListener('wheel', this.onWheel);
   }
 
-  private getLocalPos(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  /**
+   * Re-read the canvas's on-screen position into the rect cache. Called
+   * from gesture-START handlers only (pointerdown / wheel), never from
+   * pointermove — this is the one allowed layout read on the input side.
+   */
+  private refreshRect(): void {
     const rect = this.deps.canvas.getBoundingClientRect();
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    this.rectLeft = rect.left;
+    this.rectTop = rect.top;
+  }
+
+  private getLocalPos(e: { clientX: number; clientY: number }): { x: number; y: number } {
+    // Cached rect — no per-move reflow. Reusable scratch — no per-move
+    // allocation.
+    this.scratchPos.x = e.clientX - this.rectLeft;
+    this.scratchPos.y = e.clientY - this.rectTop;
+    return this.scratchPos;
   }
 
   private handleDown(e: PointerEvent): void {
     if (this.paused) return;
+    this.refreshRect();
     const pos = this.getLocalPos(e);
     this.pointers.set(e.pointerId, { id: e.pointerId, x: pos.x, y: pos.y });
     this.deps.canvas.setPointerCapture(e.pointerId);
@@ -231,6 +263,9 @@ export class PaintInput {
   private handleWheel(e: WheelEvent): void {
     if (this.paused) return;
     e.preventDefault();
+    // Wheel can fire without a preceding pointerdown (desktop) — refresh
+    // the rect cache here too.
+    this.refreshRect();
     const pos = this.getLocalPos(e);
     // Negative deltaY = scroll up = zoom in (matches Google Maps).
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -238,8 +273,14 @@ export class PaintInput {
   }
 
   private beginPanZoom(): void {
-    const ps = Array.from(this.pointers.values());
-    const [a, b] = ps;
+    // First two active pointers without allocating an array.
+    let a: ActivePointer | undefined;
+    let b: ActivePointer | undefined;
+    for (const p of this.pointers.values()) {
+      if (a === undefined) a = p;
+      else { b = p; break; }
+    }
+    if (a === undefined || b === undefined) return;
     this.pinchStartDist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
     this.pinchStartZoom = this.deps.renderer.camera.zoom;
     this.gestureStartMidX = (a.x + b.x) / 2;
@@ -249,9 +290,15 @@ export class PaintInput {
   }
 
   private applyPanZoom(): void {
-    const ps = Array.from(this.pointers.values()).slice(0, 2);
-    if (ps.length < 2) return;
-    const [a, b] = ps;
+    // First two active pointers without allocating an array (runs on
+    // every pinch/pan move — must stay allocation-free).
+    let a: ActivePointer | undefined;
+    let b: ActivePointer | undefined;
+    for (const p of this.pointers.values()) {
+      if (a === undefined) a = p;
+      else { b = p; break; }
+    }
+    if (a === undefined || b === undefined) return;
     const midX = (a.x + b.x) / 2;
     const midY = (a.y + b.y) / 2;
     const dist = Math.hypot(b.x - a.x, b.y - a.y) || 1;
@@ -326,9 +373,10 @@ export class PaintInput {
    */
   private screenToCellCoords(screenX: number, screenY: number): { cx: number; cy: number } {
     const cam = this.deps.renderer.camera;
-    const cx = Math.floor(cam.offsetX + screenX / cam.zoom);
-    const cy = Math.floor(cam.offsetY + screenY / cam.zoom);
-    return { cx, cy };
+    // Reusable scratch — callers destructure immediately, so no escape.
+    this.scratchCell.cx = Math.floor(cam.offsetX + screenX / cam.zoom);
+    this.scratchCell.cy = Math.floor(cam.offsetY + screenY / cam.zoom);
+    return this.scratchCell;
   }
 
   /**
