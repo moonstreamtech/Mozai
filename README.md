@@ -149,6 +149,20 @@ With `MOZAI_DEBUG=1` the JS console exposes
 `window.__mozaiDebug.markCompleted(id)` and `.resetProgress()` for
 verifying the % fill and lock progression without playing through.
 
+#### Enabling diagnostics on a release device (no rebuild)
+
+`MOZAI_DEBUG` is a **build-time** flag (`import.meta.env.MOZAI_DEBUG`,
+read in `src/env.ts`) and is never set on the release build path
+(`release.yml`), so it constant-folds to `false` in a shipped APK — the
+debug readout and paint perf overlay cannot be reached from the UI.
+
+To turn them on for a tester on a release build, **tap the "Mozai" title
+on the room-select screen 7 times quickly** (taps must be < 600 ms apart).
+This flips a runtime flag in `localStorage` (`mozai.debug`) and reloads;
+the `#debug` readout appears top-right immediately, and the green paint
+perf overlay (top-left) shows the moment you open a puzzle. Tap 7 times
+again to turn it back off. The flag persists on that device until cleared.
+
 ### Error overlay
 
 `src/error-overlay.ts` installs global `error` / `unhandledrejection`
