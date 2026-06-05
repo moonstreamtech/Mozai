@@ -34,11 +34,11 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // TODO: auto-increment versionCode from the CI run number once
-        // we have a release cadence. Bumped to 3 for the tablet
-        // ResizeObserver-crash fix — each uploaded bundle must use a
-        // higher versionCode than the last.
-        versionCode 3
-        versionName "0.0.3"
+        // we have a release cadence. Bumped to 4 for the paint-perf
+        // investigation build (diagnostic perf overlay) — each uploaded
+        // bundle must use a higher versionCode than the last.
+        versionCode 4
+        versionName "0.0.4"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

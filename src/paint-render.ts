@@ -51,6 +51,7 @@
  */
 
 import type { PaintState } from './paint-state.js';
+import type { PaintPerfSink } from './paint-perf.js';
 
 /**
  * Opacity of the per-cell MOZAI app-logo tile drawn on every -1
@@ -164,6 +165,13 @@ export class PaintRenderer {
   private readonly minimapOffscreenData: ImageData;
   /** Frame coalescing. */
   private rafId = 0;
+
+  /**
+   * Optional diagnostic perf sink (paint-perf.ts). Null in production
+   * (MOZAI_DEBUG off): draw() then pays only a single null check per
+   * frame. When set, draw() reports its per-frame JS duration here.
+   */
+  perf: PaintPerfSink | null = null;
 
   camera: Camera = { offsetX: 0, offsetY: 0, zoom: 1 };
 
@@ -429,6 +437,10 @@ export class PaintRenderer {
    *   6. Minimap.
    */
   draw(): boolean {
+    // Perf timing brackets the whole draw body (incl. the minimap).
+    // Off (null perf) → no performance.now() call at all.
+    const perf = this.perf;
+    const drawStart = perf ? performance.now() : 0;
     const { ctx, canvas, camera } = this;
     const cssW = canvas.clientWidth;
     const cssH = canvas.clientHeight;
@@ -457,6 +469,9 @@ export class PaintRenderer {
 
     this.drawMinimap();
 
+    // Record only frames that actually painted (the early cssW/cssH
+    // bail above does not count as a frame).
+    if (perf) perf.recordDraw(performance.now() - drawStart);
     return true;
   }
 

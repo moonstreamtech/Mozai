@@ -21,6 +21,7 @@
 
 import type { PaintRenderer, CameraLimits } from './paint-render.js';
 import type { PaintState } from './paint-state.js';
+import type { PaintPerfSink } from './paint-perf.js';
 
 export interface PaintInputDeps {
   canvas: HTMLCanvasElement;
@@ -57,6 +58,12 @@ export class PaintInput {
    * toggle.
    */
   paused = false;
+  /**
+   * Optional diagnostic perf sink (paint-perf.ts). Null in production;
+   * when set, each processed pointermove is counted so the overlay can
+   * compare moves/s against draws/s (the rAF-coalescing check).
+   */
+  perf: PaintPerfSink | null = null;
   /** True iff a single-finger paint stroke is in progress. */
   private painting = false;
   /** Cells already attempted during the current stroke (avoid retrying). */
@@ -158,6 +165,7 @@ export class PaintInput {
     if (this.paused) return;
     const p = this.pointers.get(e.pointerId);
     if (!p) return;
+    this.perf?.recordPointerMove();
     const pos = this.getLocalPos(e);
     p.x = pos.x;
     p.y = pos.y;

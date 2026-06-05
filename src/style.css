@@ -191,6 +191,29 @@ body {
   white-space: pre;
 }
 
+/*
+ * Paint-scene perf overlay (diagnostic). Mounted only under MOZAI_DEBUG;
+ * see paint-perf.ts. Top-left so it clears the app-level #debug readout
+ * (top-right) and the bottom strip below the viewport. pointer-events:
+ * none so it never intercepts a paint stroke. A green tint distinguishes
+ * it at a glance from the blue-grey #debug panel.
+ */
+.paint-perf {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 4;
+  margin: 0;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #b8f0c8;
+  font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border: 1px solid #2f5d3f;
+  border-radius: 4px;
+  pointer-events: none;
+  white-space: pre;
+}
+
 /* ============================================================
  * SCENES
  *
