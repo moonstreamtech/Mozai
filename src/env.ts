@@ -143,9 +143,62 @@ export function maskAdId(id: string): string {
 }
 
 /**
- * Debug-readout toggle. Set MOZAI_DEBUG=1 in .env (or pass
- * --define:MOZAI_DEBUG=1) to enable the on-screen metrics panel.
+ * localStorage key for the RUNTIME debug toggle. This is the only switch
+ * that works on a RELEASE build on a real device: the build-time
+ * MOZAI_DEBUG flag is never set on the release path
+ * (.github/workflows/release.yml), so it constant-folds to false in a
+ * shipped APK. The runtime flag is flipped by a hidden gesture — 7 quick
+ * taps on the room-select "Mozai" title (attachDebugTapToggle in
+ * scene-rooms.ts) — and read here at boot and at every paint-scene mount.
+ *
+ * localStorage (not @capacitor/preferences) on purpose: the gate is
+ * synchronous and Preferences is async. The OS can evict WebView storage,
+ * but for an ephemeral diagnostic toggle that just means "re-tap to turn
+ * it back on", which is fine.
+ */
+export const DEBUG_FLAG_KEY = 'mozai.debug';
+
+/** Read the runtime debug flag, defensively (a locked-down WebView can throw). */
+function runtimeDebugEnabled(): boolean {
+  try {
+    return localStorage.getItem(DEBUG_FLAG_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Flip the runtime debug flag and return the NEW state. Callers reload
+ * the page afterwards so every isDebugReadoutEnabled() gate (the boot-time
+ * #debug readout AND the per-paint-scene perf overlay) re-evaluates.
+ */
+export function toggleDebugReadout(): boolean {
+  const next = !runtimeDebugEnabled();
+  try {
+    if (next) localStorage.setItem(DEBUG_FLAG_KEY, '1');
+    else localStorage.removeItem(DEBUG_FLAG_KEY);
+  } catch {
+    /* localStorage unavailable — report the intended state regardless. */
+  }
+  return next;
+}
+
+/**
+ * Debug-readout toggle. TRUE when EITHER:
+ *   • the build-time flag MOZAI_DEBUG is '1'/'true' — set via a local
+ *     `.env` or --define on dev/QA builds, OR
+ *   • the runtime flag (localStorage[DEBUG_FLAG_KEY]) is set — the
+ *     on-device switch for release APKs (see toggleDebugReadout above).
+ *
+ * The runtime branch is deliberately OUTSIDE the build-time flag: it keeps
+ * the diagnostic code from being tree-shaken out of release bundles, so a
+ * tester can enable the overlays without a rebuild. Nothing is allocated
+ * until this returns true (mountDebugReadout / PaintPerf are only
+ * constructed then), so an un-toggled build still pays nothing.
  */
 export function isDebugReadoutEnabled(): boolean {
-  return import.meta.env.MOZAI_DEBUG === '1' || import.meta.env.MOZAI_DEBUG === 'true';
+  if (import.meta.env.MOZAI_DEBUG === '1' || import.meta.env.MOZAI_DEBUG === 'true') {
+    return true;
+  }
+  return runtimeDebugEnabled();
 }

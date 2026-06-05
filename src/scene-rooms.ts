@@ -32,6 +32,7 @@ import type { SceneContext, SceneMount } from './scenes.js';
 import { isRoomUnlocked, type ContentIndex } from './content.js';
 import { completedCountForRoom } from './progress.js';
 import { subscribeContentEvent } from './content-events.js';
+import { toggleDebugReadout } from './env.js';
 import { t } from './i18n.js';
 
 const COLUMNS = 5;
@@ -64,6 +65,13 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
 
   const grid = root.querySelector<HTMLDivElement>('.rooms-grid')!;
   grid.style.setProperty('--rooms-columns', String(COLUMNS));
+
+  // Hidden diagnostics gesture on the "Mozai" title — see
+  // attachDebugTapToggle. The only way to turn the debug readout + paint
+  // perf overlay on in a release APK on a tester's device.
+  const detachDebugTap = attachDebugTapToggle(
+    root.querySelector<HTMLHeadingElement>('.rooms-title')!,
+  );
 
   // Local index reference so the SWR 'index-updated' event can
   // swap it in place without bouncing through SceneManager.index
@@ -107,10 +115,53 @@ export const roomsSceneMount: SceneMount = (host, ctx) => {
   });
 
   return () => {
+    detachDebugTap();
     offIndex();
     root.remove();
   };
 };
+
+/**
+ * Number of quick taps on the "Mozai" title that toggles diagnostics, and
+ * the maximum gap allowed between consecutive taps. Mirrors Android's
+ * "tap Build Number 7 times" affordance: invisible to a normal player,
+ * trivial for a tester to perform on the very first screen.
+ */
+const DEBUG_TAP_COUNT = 7;
+const DEBUG_TAP_GAP_MS = 600;
+
+/**
+ * Hidden diagnostics gesture: DEBUG_TAP_COUNT quick taps on the room-select
+ * title toggle the debug readout + paint perf overlay (toggleDebugReadout)
+ * and reload so every isDebugReadoutEnabled() gate re-evaluates against the
+ * new flag. This is the on-device switch for RELEASE builds, where the
+ * build-time MOZAI_DEBUG flag is off and there is otherwise no way to turn
+ * the overlays on. Taps must land within DEBUG_TAP_GAP_MS of each other;
+ * any longer gap resets the counter, so an ordinary single tap on the
+ * title never accumulates toward the toggle.
+ *
+ * Returns a detach function for scene teardown.
+ */
+function attachDebugTapToggle(title: HTMLElement): () => void {
+  let taps = 0;
+  let lastTap = 0;
+  const onTap = (): void => {
+    const now = Date.now();
+    taps = now - lastTap <= DEBUG_TAP_GAP_MS ? taps + 1 : 1;
+    lastTap = now;
+    if (taps < DEBUG_TAP_COUNT) return;
+    taps = 0;
+    const enabled = toggleDebugReadout();
+    // alert() is the one feedback channel guaranteed to render on a
+    // release device (no console, no remote dev tools). The reload that
+    // follows re-mounts every scene against the new flag, so the #debug
+    // readout appears (or disappears) immediately.
+    window.alert(`Mozai diagnostics ${enabled ? 'ON' : 'OFF'}`);
+    window.location.reload();
+  };
+  title.addEventListener('click', onTap);
+  return () => title.removeEventListener('click', onTap);
+}
 
 function buildRoomCell(n: number, index: ContentIndex, ctx: SceneContext): HTMLElement {
   const total = index.rooms[String(n)]?.length ?? 0;

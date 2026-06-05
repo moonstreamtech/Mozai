@@ -34,8 +34,9 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // TODO: auto-increment versionCode from the CI run number once
-        // we have a release cadence. Bumped to 4 for the paint-perf
-        // investigation build (diagnostic perf overlay) — each uploaded
+        // we have a release cadence. Held at 4 for the paint-perf
+        // investigation build (diagnostic perf overlay + on-device
+        // diagnostics toggle are the same investigation) — each uploaded
         // bundle must use a higher versionCode than the last.
         versionCode 4
         versionName "0.0.4"
