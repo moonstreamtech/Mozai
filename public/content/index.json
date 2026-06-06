@@ -109,6 +109,14 @@
         "h": 30,
         "colors": 6,
         "paintableCells": 288
+      },
+      {
+        "id": "r3-007",
+        "room": 3,
+        "w": 30,
+        "h": 30,
+        "colors": 6,
+        "paintableCells": 295
       }
     ],
     "100": [
