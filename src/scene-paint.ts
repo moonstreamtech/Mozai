@@ -227,6 +227,11 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
           state,
           limits: () => limits,
           getSelectedColor: () => selectedColor,
+          // Double-tap auto-pick: select the double-tapped cell's true
+          // colour exactly as if the player had tapped that swatch
+          // (highlights it, refreshes the hint button). The input layer
+          // then paints the cell with this freshly-selected colour.
+          onRequestSelectColor: (colorIdx) => selectColor(colorIdx),
           onCellFilled: (_cell, colorIdx, completed) => {
             updatePalette();
             updateOverall();
@@ -501,17 +506,36 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
         const idx = Number(el.dataset.idx);
         const total = state!.colorTotal[idx];
         const done = state!.colorFilled[idx];
-        const pct = total > 0 ? Math.round((done / total) * 100) : 100;
+        // A colour is finished IFF every cell of it is painted —
+        // INTEGER-EXACT (done === total), NEVER a rounded percentage.
+        // `.swatch.is-done` is opacity:0 + pointer-events:none, so
+        // marking it on a float percentage that Math.round bumps to 100
+        // at >= 99.5% would make the swatch vanish AND become
+        // unselectable while 1-2 cells of that colour are still
+        // unpainted — which made large-region puzzles uncompletable.
+        // colorFilled can never exceed colorTotal (attemptFill guards
+        // it), so `>=` here is exact equality.
+        const isDone = total > 0 && done >= total;
+        // Displayed %: clamp to 99 until the count is exactly complete,
+        // so the swatch never SHOWS "100%" with a cell still unpainted.
+        const rawPct = total > 0 ? Math.round((done / total) * 100) : 100;
+        const pct = isDone ? 100 : Math.min(99, rawPct);
         const pctEl = el.querySelector<HTMLElement>('[data-pct]');
         if (pctEl) pctEl.textContent = `${pct}%`;
-        el.classList.toggle('is-done', pct >= 100);
+        el.classList.toggle('is-done', isDone);
       });
     }
 
     function updateOverall(): void {
       if (!state) return;
       const s = state.snapshot();
-      const pct = s.paintableCount > 0 ? Math.round((s.filledCount / s.paintableCount) * 100) : 0;
+      const rawPct =
+        s.paintableCount > 0 ? Math.round((s.filledCount / s.paintableCount) * 100) : 0;
+      // Completion is integer-exact (s.complete === filledCount ===
+      // paintableCount). Clamp the displayed % to 99 until then so the
+      // topbar never reads "100%" with cells still unpainted — the
+      // float round would otherwise hit 100 at >= 99.5%.
+      const pct = s.complete ? 100 : Math.min(99, rawPct);
       // Render "✓ Done" instead of "100%" on a completed picture so
       // the user opening an already-finished puzzle sees a clear
       // completion indicator in the topbar without the modal
@@ -547,6 +571,23 @@ export function makePaintSceneMount(target: PaintTarget): SceneMount {
      * colour is done" before it disappears.
      */
     function maybeDropSwatch(idx: number): void {
+      // Dev-only invariant (MOZAI_DEBUG / on-device toggle): a colour is
+      // removed from the palette ONLY when every cell of it is painted.
+      // Cross-check against a FRESH scan of cells[] (NOT the incremental
+      // colorFilled/colorTotal counters) so a counting regression that
+      // lets a swatch vanish while real cells remain is caught here
+      // instead of silently shipping an uncompletable puzzle.
+      if (isDebugReadoutEnabled() && state) {
+        const remaining = state.countUnpaintedOfColor(idx);
+        if (remaining > 0) {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[Mozai] ASSERT FAIL: colour ${idx} removed from palette with ${remaining} ` +
+              `cell(s) still unpainted (colorFilled=${state.colorFilled[idx]}, ` +
+              `colorTotal=${state.colorTotal[idx]})`,
+          );
+        }
+      }
       const swatch = paletteEl.querySelector<HTMLElement>(`.swatch[data-idx="${idx}"]`);
       if (!swatch) return;
       swatch.classList.add('is-done');
