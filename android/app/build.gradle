@@ -34,12 +34,12 @@ android {
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         // TODO: auto-increment versionCode from the CI run number once
-        // we have a release cadence. Held at 4 for the paint-perf
-        // investigation build (diagnostic perf overlay + on-device
-        // diagnostics toggle are the same investigation) — each uploaded
-        // bundle must use a higher versionCode than the last.
-        versionCode 4
-        versionName "0.0.4"
+        // we have a release cadence. Each uploaded bundle must use a
+        // higher versionCode than the last. Bumped to 5 for the
+        // completion-bug fix (colour removed from the palette before all
+        // its cells were painted) + the double-tap colour auto-pick.
+        versionCode 5
+        versionName "0.0.5"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.

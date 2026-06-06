@@ -41,6 +41,7 @@
 import { Preferences } from '@capacitor/preferences';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import type { Puzzle } from './content.js';
+import { isDebugReadoutEnabled } from './env.js';
 
 const PREFERENCES_BYTE_THRESHOLD = 50 * 1024;     // 50 KB threshold to spill to Filesystem
 const STORAGE_KEY_PREFIX = 'mozai.pic.';
@@ -141,6 +142,14 @@ export class PaintState {
     }
     this.paintableCount = paintable;
     this.paintableBounds = maxX < minX || maxY < minY ? null : { minX, minY, maxX, maxY };
+
+    // The authoritative per-colour targets are the FRESH counts above
+    // (counted straight from cells[]), never the puzzle JSON's optional
+    // `colorCounts` — that field is informational and can drift from the
+    // actual cells. Dev-only: cross-check the two so a content-pipeline
+    // mismatch is visible in a debug session. Completion logic ALWAYS
+    // uses colorTotal regardless of what colorCounts claims.
+    if (isDebugReadoutEnabled()) this.validateDeclaredColorCounts();
   }
 
   /** Attempt to paint cell `i` with `colorIdx`. */
@@ -170,6 +179,46 @@ export class PaintState {
    */
   isComplete(): boolean {
     return this.paintableCount > 0 && this.filledCount >= this.paintableCount;
+  }
+
+  /**
+   * FRESH authoritative count of still-unpainted cells whose true
+   * colour is `colorIdx`, computed by scanning solution + filled
+   * directly — NOT derived from the incremental colorFilled/colorTotal
+   * counters. Used by the dev-only completion assertion (scene-paint
+   * maybeDropSwatch) so a regression in the incremental counters can be
+   * caught against ground truth before an uncompletable puzzle ships.
+   * O(cells); only called at the moment a colour is declared finished.
+   */
+  countUnpaintedOfColor(colorIdx: number): number {
+    const { solution, filled } = this;
+    let n = 0;
+    for (let i = 0; i < solution.length; i++) {
+      if (solution[i] === colorIdx && filled[i] === 0) n++;
+    }
+    return n;
+  }
+
+  /**
+   * Dev-only sanity check: compare the puzzle JSON's optional
+   * `colorCounts` against the fresh per-colour totals counted from
+   * cells[]. Logs a warning on any mismatch. Purely diagnostic — the
+   * engine always trusts the fresh colorTotal.
+   */
+  private validateDeclaredColorCounts(): void {
+    const declared = this.puzzle.colorCounts;
+    if (!declared || typeof declared !== 'object') return;
+    for (const [key, count] of Object.entries(declared)) {
+      const idx = Number(key);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= this.colorTotal.length) continue;
+      if (this.colorTotal[idx] !== count) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[Mozai] puzzle ${this.puzzle.id}: colorCounts[${key}]=${count} but cells[] ` +
+            `contains ${this.colorTotal[idx]}; using the fresh count`,
+        );
+      }
+    }
   }
 
   /** Convenience: snapshot for UI binding. */

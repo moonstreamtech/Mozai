@@ -23,6 +23,17 @@ import type { PaintRenderer, CameraLimits } from './paint-render.js';
 import type { PaintState } from './paint-state.js';
 import type { PaintPerfSink } from './paint-perf.js';
 
+/**
+ * Max gap between two taps on the same cell for the pair to count as a
+ * double-tap (colour auto-pick). ~300 ms is the platform-conventional
+ * double-tap window. Crucially this does NOT add latency to a single
+ * tap: the first tap paints on its own pointerdown immediately; the
+ * window is only ever measured retroactively on the SECOND tap's
+ * pointerdown (see handleDown). A lone tap is never delayed waiting to
+ * see whether a second one arrives.
+ */
+const DOUBLE_TAP_MS = 300;
+
 export interface PaintInputDeps {
   canvas: HTMLCanvasElement;
   renderer: PaintRenderer;
@@ -35,6 +46,14 @@ export interface PaintInputDeps {
    * react to puzzle completion.
    */
   onCellFilled: (cellIndex: number, colorIndex: number, completed: boolean) => void;
+  /**
+   * Ask the scene to make `colorIndex` the active palette colour —
+   * the double-tap auto-pick uses this. The scene mirrors a manual
+   * swatch tap (sets the active colour, highlights the swatch,
+   * refreshes the hint button). Optional: when absent, double-tap
+   * auto-pick is simply inert and normal painting is unaffected.
+   */
+  onRequestSelectColor?: (colorIndex: number) => void;
   /**
    * Called whenever a pan or zoom changes the camera. Used by the
    * scene to toggle the minimap on/off as the user zooms past fit.
@@ -81,6 +100,16 @@ export class PaintInput {
    */
   private lastCellX = -1;
   private lastCellY = -1;
+  /**
+   * Double-tap tracker (colour auto-pick). SEPARATE from the Bresenham
+   * lastCellX/Y above — those reset every stroke, whereas these must
+   * persist across the pointerup between the first and second tap. The
+   * cell coords use -1 as a "no candidate" sentinel; a real cell is
+   * always >= 0, so a reset to -1 reliably prevents a stale match.
+   */
+  private lastTapTime = 0;
+  private lastTapCellX = -1;
+  private lastTapCellY = -1;
   /** Pinch-zoom baseline: distance between the two pointers at gesture start. */
   private pinchStartDist = 0;
   private pinchStartZoom = 1;
@@ -168,14 +197,34 @@ export class PaintInput {
     this.deps.canvas.setPointerCapture(e.pointerId);
 
     if (this.pointers.size === 1) {
+      // Resolve the tapped cell ONCE — shared by the immediate first-
+      // tap paint and the double-tap detection below.
+      const { cx, cy } = this.screenToCellCoords(pos.x, pos.y);
+
+      // Double-tap → auto-pick the tapped cell's colour. Detected here,
+      // on the SECOND tap's pointerdown, by comparing against the
+      // previous tap's cell + time. We act immediately and never wait,
+      // so a single tap is NEVER delayed (it already painted on its own
+      // pointerdown). When this completes a double-tap on the same cell
+      // within the window, select that cell's colour BEFORE the paint
+      // below, so the very same gesture both selects the colour AND
+      // fills the cell.
+      const now = e.timeStamp || performance.now();
+      const sameCell = cx === this.lastTapCellX && cy === this.lastTapCellY;
+      const isDoubleTap = sameCell && now - this.lastTapTime <= DOUBLE_TAP_MS;
+      this.lastTapTime = now;
+      this.lastTapCellX = cx;
+      this.lastTapCellY = cy;
+      if (isDoubleTap) this.maybeAutoSelectColorAt(cx, cy);
+
       // Start a paint stroke immediately on first touch so the cell
-      // tapped on a quick tap-and-release also fills.
+      // tapped on a quick tap-and-release also fills. On a double-tap
+      // this now reads the freshly auto-selected colour.
       this.painting = this.deps.getSelectedColor() >= 0;
       this.strokeAttempted.clear();
       this.lastCellX = -1;
       this.lastCellY = -1;
       if (this.painting) {
-        const { cx, cy } = this.screenToCellCoords(pos.x, pos.y);
         this.attemptCellXY(cx, cy);
         this.lastCellX = cx;
         this.lastCellY = cy;
@@ -186,6 +235,11 @@ export class PaintInput {
       this.strokeAttempted.clear();
       this.lastCellX = -1;
       this.lastCellY = -1;
+      // A pinch/pan is not a tap — drop any pending double-tap candidate
+      // so that lifting back to one finger and tapping can't be misread
+      // as the second half of a double-tap.
+      this.lastTapCellX = -1;
+      this.lastTapCellY = -1;
       this.beginPanZoom();
     }
     // 3+ fingers: ignore — pan/zoom uses the first two and the rest
@@ -216,6 +270,11 @@ export class PaintInput {
         // cost is bounded by the segment length (max(|dx|,|dy|)) —
         // never the whole grid.
         this.paintLineXY(this.lastCellX, this.lastCellY, cx, cy);
+        // The stroke crossed into a new cell → this is a drag, not a
+        // tap. Drop the double-tap candidate so a tap landing on this
+        // stroke's origin right after isn't misread as a double-tap.
+        this.lastTapCellX = -1;
+        this.lastTapCellY = -1;
       }
       this.lastCellX = cx;
       this.lastCellY = cy;
@@ -401,6 +460,35 @@ export class PaintInput {
       this.deps.renderer.updateCellFilled(cell);
       this.deps.onCellFilled(cell, colorIdx, result.completed);
     }
+  }
+
+  /**
+   * Double-tap colour auto-pick. Called from handleDown when a second
+   * tap lands on the same cell within DOUBLE_TAP_MS. If that cell is an
+   * UNPAINTED, paintable cell whose true colour isn't already the
+   * active one, ask the scene to select it. The caller's normal
+   * first-tap paint then runs with the freshly-selected colour, so the
+   * cell also fills as part of the same gesture.
+   *
+   * Deliberately a no-op for:
+   *   - background (-1) cells — nothing to pick,
+   *   - already-painted cells — the spec scopes auto-pick to unpainted
+   *     cells; e.g. a same-colour double-tap whose first tap already
+   *     filled the cell just leaves the selection unchanged,
+   *   - the colour already being selected — harmless, avoids a
+   *     redundant scene update.
+   * In every no-op case the normal single-tap paint still stands.
+   */
+  private maybeAutoSelectColorAt(cx: number, cy: number): void {
+    const { state } = this.deps;
+    const puzzle = state.puzzle;
+    if (cx < 0 || cy < 0 || cx >= puzzle.w || cy >= puzzle.h) return;
+    const cell = cy * puzzle.w + cx;
+    const target = state.solution[cell];
+    if (target < 0) return;                              // background
+    if (state.filled[cell]) return;                      // already painted
+    if (this.deps.getSelectedColor() === target) return; // already active
+    this.deps.onRequestSelectColor?.(target);
   }
 
   /**
