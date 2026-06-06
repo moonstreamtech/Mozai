@@ -127,6 +127,14 @@
         "h": 40,
         "colors": 5,
         "paintableCells": 734
+      },
+      {
+        "id": "r4-002",
+        "room": 4,
+        "w": 40,
+        "h": 40,
+        "colors": 4,
+        "paintableCells": 574
       }
     ],
     "100": [
